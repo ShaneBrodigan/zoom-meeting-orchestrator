@@ -1,3 +1,5 @@
+import random
+
 import zoom_meeting_sdk as zoom
 import jwt
 from deepgram_transcriber import DeepgramTranscriber
@@ -81,7 +83,11 @@ def create_red_yuv420_frame(width=640, height=360):
     return yuv_frame.tobytes()
 
 class MeetingBot:
-    def __init__(self):
+    def __init__(self, meeting_id, meeting_pwd, zak_token):
+
+        self.meeting_id = meeting_id
+        self.meeting_pwd = meeting_pwd
+        self.zak_token = zak_token
 
         self.meeting_service = None
         self.setting_service = None
@@ -93,6 +99,7 @@ class MeetingBot:
 
         self.audio_source = None
         self.audio_helper = None
+        self.pcm_file = None
 
         self.audio_settings = None
 
@@ -163,10 +170,10 @@ class MeetingBot:
         print("CleanUPSDK() finished")
 
     def init(self):
-        if os.environ.get('MEETING_ID') is None:
-            raise Exception('No MEETING_ID found in environment. Please define this in a .env file located in the repository root')
-        if os.environ.get('MEETING_PWD') is None:
-            raise Exception('No MEETING_PWD found in environment. Please define this in a .env file located in the repository root')
+        if self.meeting_id is None:
+            raise Exception('No MEETING_ID found')
+        if self.meeting_pwd is None:
+            raise Exception('No meeting_pwd found.')
         if os.environ.get('ZOOM_APP_CLIENT_ID') is None:
             raise Exception('No ZOOM_APP_CLIENT_ID found in environment. Please define this in a .env file located in the repository root')
         if os.environ.get('ZOOM_APP_CLIENT_SECRET') is None:
@@ -318,6 +325,7 @@ class MeetingBot:
         # This is work-around to get it to work again.
         # See here for more details: https://devforum.zoom.us/t/cant-record-audio-with-linux-meetingsdk-after-6-3-5-6495-error-code-32/130689/5
         self.audio_ctrl.JoinVoip()
+        self.audio_ctrl.UnMuteAudio(self.my_participant_id) # Unmutes Bot when it joins meeting
 
         self.chat_ctrl = self.meeting_service.GetMeetingChatController()
         self.chat_ctrl_event = zoom.MeetingChatEventCallbacks(onChatMsgNotificationCallback=self.on_chat_msg_notification_callback)
@@ -367,14 +375,29 @@ class MeetingBot:
 
     def on_mic_start_send_callback(self):
         print("on_mic_start_send_callback called")
-        audio_path = 'sample_program/input_audio/test_audio_16778240.pcm'
+        audio_path = 'sample_program/input_audio/librispeech_audio.pcm'
         if not os.path.exists(audio_path):
             print(f"Audio file not found: {audio_path}")
             return
 
-        with open(audio_path, 'rb') as pcm_file:
-            chunk = pcm_file.read(64000*10)
+        self.pcm_file = open(audio_path, 'rb')
+
+        # Seek to a random position in the file
+        self.pcm_file.seek(0, 2)
+        file_size = self.pcm_file.tell()
+        random_start = random.randint(0, file_size - 64000)
+        random_start = (random_start // 2) * 2
+        self.pcm_file.seek(random_start)
+
+        def send_audio_chunk():
+            chunk = self.pcm_file.read(64000)
+            if not chunk:
+                self.pcm_file.seek(0)
+                chunk = self.pcm_file.read(64000)
             self.audio_raw_data_sender.send(chunk, 32000, zoom.ZoomSDKAudioChannel_Mono)
+            return True
+
+        GLib.timeout_add(1000, send_audio_chunk)
 
     def on_one_way_audio_raw_data_received_callback(self, data, node_id):
         if os.environ.get('DEEPGRAM_API_KEY') is None:
@@ -430,7 +453,7 @@ class MeetingBot:
         print("on_share_audio_start_send_callback called, sender =", sender)
         self.share_audio_sender = sender
 
-        audio_path = 'sample_program/input_audio/test_audio_16778240.pcm'
+        audio_path = 'sample_program/input_audio/librispeech_audio.pcm'
 
         if not os.path.exists(audio_path):
             print(f"Audio file not found: {audio_path}")
@@ -440,6 +463,7 @@ class MeetingBot:
         # with open(audio_path, 'rb') as pcm_file:
         #     chunk = pcm_file.read(64000*10)
         #     self.audio_raw_data_sender.send(chunk, 32000, zoom.ZoomSDKAudioChannel_Mono)
+
 
     def on_share_audio_stop_send_callback(self):
         print("on_share_audio_stop_send_callback called")
@@ -570,9 +594,9 @@ class MeetingBot:
 
 
     def join_meeting(self):
-        mid = os.environ.get('MEETING_ID')
-        password = os.environ.get('MEETING_PWD')
-        display_name = "My meeting bot"
+        mid = self.meeting_id
+        password = self.meeting_pwd
+        display_name = "Meeting Bot"
 
         meeting_number = int(mid)
 
@@ -583,6 +607,7 @@ class MeetingBot:
         param.meetingNumber = meeting_number
         param.userName = display_name
         param.psw = password
+        param.userZAK = self.zak_token
         param.isVideoOff = False
         param.isAudioOff = False
         param.isAudioRawDataStereo = False

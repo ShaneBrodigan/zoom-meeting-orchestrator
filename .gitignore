@@ -6,7 +6,7 @@ venv
 # ignore the config file
 config.toml
 
-# ignore the SDK files added to the project
+# ignore the SDK files added to the Continuous Assessment
 lib/zoomsdk/images
 lib/zoomsdk/h
 lib/zoomsdk/json
@@ -24,7 +24,7 @@ src/zoom_meeting_sdk/__pycache__/
 .env
 
 # PCM files
-#*.pcm
+*.pcm
 
 # YUV files
 *.yuv
