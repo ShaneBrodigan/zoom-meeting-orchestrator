@@ -23,6 +23,12 @@ sample_program/__pycache__
 src/zoom_meeting_sdk/__pycache__/
 .env
 
+# Python caches and tooling (covers every package, not just the two above)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
 # PCM files
 *.pcm
 
