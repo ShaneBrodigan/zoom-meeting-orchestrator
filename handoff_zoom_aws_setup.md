@@ -2,8 +2,8 @@
 **Project:** MSc AI Thesis — Classifying Encrypted Zoom VoIP Traffic
 **Student:** Shane Brodigan, x24309940, National College of Ireland
 **Date:** 2026-06-02
-**Current State:** Infrastructure complete and verified. VMs stopped to save cost. Refactor **design converged** (see `REFACTOR_DESIGN.md`); implementation pending.
-**Next Session Focus:** Implement the refactor of `py-zoom-meeting-sdk/sample_program/` per `REFACTOR_DESIGN.md`, starting with the frozen S3 contract and the VM4 orchestrator.
+**Current State:** Infrastructure complete and verified. VMs stopped to save cost. Refactor **in progress** — Phase 1 + Phase 2a–2d done; `common/s3.py` verified against real AWS on VM4 (2026-06-03), which surfaced and fixed the IAM object-ARN bug recorded in the IAM section below.
+**Next Session Focus:** Continue the refactor per `handovers/handoff_zoom_refactor_phase3.md` — next module is `orchestrator/meeting_scheduler.py` (2e), which needs VM4 up and a live Zoom call.
 
 For research scope, model rationale, evaluation methodology, and the topology diagram, see the methodology paper at `Shane_Brodigan_24309940__Practicum_Internship_Part_2.pdf`. **This document covers the deployed infrastructure only.** The bot programme design, S3 contract, orchestration flow, and the (now-resolved) open design questions live in [`REFACTOR_DESIGN.md`](./REFACTOR_DESIGN.md).
 
@@ -87,13 +87,14 @@ Because VM4 is a **single-ENI** NAT instance, `ens5` sees **two copies of every 
 
 ### S3
 - **Bucket:** `zoom-bot-dataset-s3` (eu-west-1)
-- **Folders:** `input_audio/` (contains `librispeech_audio_1gb.pcm`, a 1GB trimmed subset of LibriSpeech train-clean-100), `sessions/` (populated at runtime, one folder per call session)
+- **Folders:** `input_audio/` (contains `librispeech_audio.pcm`, a 1GB trimmed subset of LibriSpeech train-clean-100), `sessions/` (populated at runtime, one folder per call session)
 - **VPC Gateway Endpoint:** Configured so EC2 → S3 traffic stays on AWS internal network (free, no NAT bandwidth used)
 
 ### IAM
-- **Policy:** `zoom-bot-s3-policy` — `s3:GetObject`, `s3:PutObject`, `s3:ListBucket` on `zoom-bot-dataset-s3` only
+- **Policy:** `zoom-bot-s3-policy` — `s3:ListBucket` on `arn:aws:s3:::zoom-bot-dataset-s3` (the bucket ARN) and `s3:GetObject`/`s3:PutObject` on `arn:aws:s3:::zoom-bot-dataset-s3/*` (the object ARN). **No `s3:DeleteObject`** — a bot deliberately cannot delete dataset objects.
 - **Role:** `zoom-bot-ec2-role` — attached to all 5 VMs
-- **Scope is intentionally narrow.** No `ec2:Describe*` perms. From inside a VM you cannot list other instances, IPs, or VPC config via AWS CLI — use the AWS Console or your local AWS CLI for that. For S3 ops from any VM, the role works out of the box.
+- **Scope is intentionally narrow.** No `ec2:Describe*` perms. From inside a VM you cannot list other instances, IPs, or VPC config via AWS CLI — use the AWS Console or your local AWS CLI for that.
+- ⚠️ **The object actions need the `/*` ARN.** Originally the policy listed `GetObject`/`PutObject` against the *bucket* ARN (and a mistyped `zoom-bot-dataset/*` missing the `-s3`), so `ListBucket` worked but every object read/write returned `AccessDenied`. Fixed 2026-06-03 after the `common/s3.py` smoke test surfaced it. `ListBucket` belongs on the bucket ARN; `GetObject`/`PutObject` belong on the `/*` object ARN — don't collapse them onto one resource.
 
 ---
 

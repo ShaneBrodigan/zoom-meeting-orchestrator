@@ -71,7 +71,7 @@ def make_manifest() -> Manifest:
             JoinLeave(ip="10.0.2.67", t_join=103.2, t_leave=220.0),
         ],
         capture=Capture(t_start=96.5, t_stop=222.0, pcap_key="sessions/sess-001/capture.pcap"),
-        audio={"seed": 4711, "source": "librispeech_audio_1gb.pcm"},
+        audio={"seed": 4711, "source": "librispeech_audio.pcm"},
         noise={"enabled": False},
         seeds=Seeds(turns=4711, timing=9001),
     )

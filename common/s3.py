@@ -3,7 +3,7 @@
 This is the one place that knows the S3 key layout (REFACTOR_DESIGN.md section 3)::
 
     s3://zoom-bot-dataset-s3/
-      input_audio/librispeech_audio_1gb.pcm     # shared source
+      input_audio/librispeech_audio.pcm     # shared source
       sessions/{session_id}/
         spec.json                               # VM4 -> clients
         heartbeats/{ip}.json                     # each agent/bot -> VM4
@@ -30,7 +30,7 @@ from common.schema import HeartbeatEvent, Manifest, Spec
 
 DEFAULT_BUCKET = "zoom-bot-dataset-s3"
 DEFAULT_REGION = "eu-west-1"
-AUDIO_SOURCE_KEY = "input_audio/librispeech_audio_1gb.pcm"
+AUDIO_SOURCE_KEY = "input_audio/librispeech_audio.pcm"
 
 
 class SessionStore:

@@ -99,9 +99,9 @@ def test_noise_summary_records_source():
 
 
 def test_audio_records_seed_and_optional_source():
-    m = build_manifest(make_spec(), [], capture(), audio_source="librispeech_audio_1gb.pcm")
+    m = build_manifest(make_spec(), [], capture(), audio_source="librispeech_audio.pcm")
     assert m.audio["seed"] == 4711
-    assert m.audio["source"] == "librispeech_audio_1gb.pcm"
+    assert m.audio["source"] == "librispeech_audio.pcm"
 
 
 def test_manifest_round_trips_after_build():
