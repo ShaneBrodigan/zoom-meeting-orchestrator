@@ -2,7 +2,7 @@
 
 **Project:** MSc AI Thesis — Classifying Encrypted Zoom VoIP Traffic
 **Student:** Shane Brodigan, x24309940, National College of Ireland
-**Status:** Design converged (grill-me session, 2026-06-02). Implementation in progress — Phase 1 + Phase 2a–2f done (`common/s3.py` verified against real AWS 2026-06-03; `meeting_scheduler.py` 2e live-verified 2026-06-04; `capture.py` 2f live-verified on VM4 2026-06-04 — real tshark on `ens5` captured only pre-NAT client IPs; note: pcap must be written to `/tmp`, dumpcap drops privileges). See `handovers/handoff_zoom_refactor_phase4.md` for current progress.
+**Status:** Design converged (grill-me session, 2026-06-02). Implementation in progress — Phase 1 + Phase 2a–2g done (`common/s3.py` verified against real AWS 2026-06-03; `meeting_scheduler.py` 2e live-verified 2026-06-04; `capture.py` 2f live-verified on VM4 2026-06-04 — real tshark on `ens5` captured only pre-NAT client IPs; note: pcap must be written to `/tmp`, dumpcap drops privileges). `orchestrator/session_orchestrator.py` 2g **built + unit-verified 2026-06-08** (the VM4 conductor; 87 tests pass) — a grill-me pass that day refined §4 (recorded pre/post-roll) and decision 10 (noise is an independent record, not a spec trigger). **Next: live AWS plumbing run of 2g** (empty joins expected, no bots yet). See `handovers/handoff_zoom_refactor_phase5.md` for current progress.
 **Companion docs:** infrastructure in [`handoff_zoom_aws_setup.md`](./handoff_zoom_aws_setup.md); research scope/methodology in `Shane_Brodigan_24309940__Practicum_Internship_Part_2.pdf`.
 
 This document records the design for refactoring `sample_program/` from a single-machine
@@ -126,6 +126,13 @@ The refactor is therefore architectural, not a config tweak.
     interleaving and risk header artifacts the model could learn. Because downstream features are
     **flow-level (5-tuple)**, the `noise` block records the iperf **target/ports** so mixed-traffic
     VMs remain exactly separable when concurrent noise arrives.
+    **Noise is a record, not a trigger** (refined 2026-06-08, grill-me). VM5 runs its iperf load
+    **independently** of the per-session spec — on its own schedule — so background traffic is present
+    through the pre-roll, post-roll, and gaps. This denies a model the trivial "any traffic = a call"
+    shortcut it could otherwise learn from a silent-then-call pcap. The spec's `noise` block therefore
+    *records* what VM5 is doing (for 5-tuple separability) but never *starts* it; since the recorded
+    pre-roll precedes the spec, a spec-triggered noise could never cover it anyway. The orchestrator
+    (VM4) does not launch or stop noise.
 
 11. **Build scope — n-participants now; phased validation.**
     VM1/VM2/VM3 are all Docker-ready (the handoff was stale: VM3 *is* provisioned like VM1/VM2).
@@ -188,8 +195,8 @@ s3://zoom-bot-dataset-s3/
 ```
 VM4 (orchestrator + capture):
   create meeting (REST)  -> id / pwd / zak
-  sleep rand(preroll)
-  start tshark on ens5 with the client-subnet filter
+  start tshark on ens5 with the client-subnet filter   # capture running before anyone can join
+  sleep rand(preroll)                        # recorded quiet-with-noise dead-air at the head of the pcap
   write spec.json -> S3                      # clients cannot see session until now
 
 Clients VM1/2/3/5 (single container, polling):
@@ -200,7 +207,7 @@ Clients VM1/2/3/5 (single container, polling):
 
 VM4:
   at duration expiry -> REST end meeting      # hard media stop, independent of bot health
-  sleep rand(postroll); stop tshark
+  sleep rand(postroll); stop tshark           # recorded tail: call winds down to background-only in the pcap
   merge spec + heartbeats + capture -> manifest.json; upload capture.pcap + manifest.json
 
 Offline (versioned, no AWS):
