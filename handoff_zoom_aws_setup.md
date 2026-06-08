@@ -2,8 +2,8 @@
 **Project:** MSc AI Thesis — Classifying Encrypted Zoom VoIP Traffic
 **Student:** Shane Brodigan, x24309940, National College of Ireland
 **Date:** 2026-06-02
-**Current State:** Infrastructure complete and verified. VMs stopped to save cost. Refactor **in progress** — Phase 1 + Phase 2a–2d done; `common/s3.py` verified against real AWS on VM4 (2026-06-03), which surfaced and fixed the IAM object-ARN bug recorded in the IAM section below.
-**Next Session Focus:** Continue the refactor per `handovers/handoff_zoom_refactor_phase3.md` — next module is `orchestrator/meeting_scheduler.py` (2e), which needs VM4 up and a live Zoom call.
+**Current State:** Infrastructure complete and verified. VMs stopped to save cost. Refactor **in progress** — Phase 1 + Phase 2a–2f done; `common/s3.py` verified against real AWS on VM4 (2026-06-03, surfaced+fixed the IAM object-ARN bug in the IAM section below); `orchestrator/meeting_scheduler.py` (2e) live-verified on VM4 (2026-06-04). `orchestrator/capture.py` (2f) **live-verified on VM4 (2026-06-04)** — real tshark on `ens5` captured only pre-NAT client IPs; surfaced the dumpcap `/tmp` write-path requirement noted below.
+**Next Session Focus:** Continue the refactor per `handovers/handoff_zoom_refactor_phase4.md` — 2f is now live-verified; next is `orchestrator/session_orchestrator.py` (2g), the first full orchestrated run. Remember 2g must write `capture.pcap` to a `/tmp` path (dumpcap privilege-drop note below).
 
 For research scope, model rationale, evaluation methodology, and the topology diagram, see the methodology paper at `Shane_Brodigan_24309940__Practicum_Internship_Part_2.pdf`. **This document covers the deployed infrastructure only.** The bot programme design, S3 contract, orchestration flow, and the (now-resolved) open design questions live in [`REFACTOR_DESIGN.md`](./REFACTOR_DESIGN.md).
 
@@ -114,7 +114,14 @@ The client VMs cannot be SSH'd into directly from the internet — they have no 
 
 | VM | Software |
 |---|---|
-| VM4 | AWS CLI v2, tshark (capture-only, non-root capture disabled), iptables-persistent |
+| VM4 | AWS CLI v2, tshark (capture-only, non-root capture disabled — use `sudo`), iptables-persistent |
+
+> ⚠️ **tshark/dumpcap capture-file path on VM4.** `dumpcap` (tshark's write helper) **drops privileges
+> before opening the `-w` output file**, so even under `sudo` it cannot write into a home dir (mode 755)
+> — it prints `Capturing on 'ens5'` then fails with `could not be opened: Permission denied`. It writes
+> fine to **`/tmp`** (mode 1777). Not AppArmor (`dmesg | grep -i denied` empty). **Always write session
+> pcaps to a `/tmp` path** (a root-created `/tmp` subdir is 755 and re-breaks it — capture directly into
+> `/tmp` or make the subdir `1777`). Confirmed 2026-06-04 live-verifying `orchestrator/capture.py`.
 | VM1 | Docker CE + Compose plugin (official Docker apt repo, not snap/docker.io). User `ubuntu` is in `docker` group. |
 | VM2 | Same as VM1 |
 | VM3 | Docker CE + Compose plugin (official Docker apt repo). Provisioned identically to VM1/VM2 — ready as 3-party joiner. |

@@ -2,7 +2,7 @@
 
 **Project:** MSc AI Thesis — Classifying Encrypted Zoom VoIP Traffic
 **Student:** Shane Brodigan, x24309940, National College of Ireland
-**Status:** Design converged (grill-me session, 2026-06-02). Implementation in progress — Phase 1 + Phase 2a–2d done and `common/s3.py` verified against real AWS (2026-06-03). See `handovers/handoff_zoom_refactor_phase3.md` for current progress.
+**Status:** Design converged (grill-me session, 2026-06-02). Implementation in progress — Phase 1 + Phase 2a–2f done (`common/s3.py` verified against real AWS 2026-06-03; `meeting_scheduler.py` 2e live-verified 2026-06-04; `capture.py` 2f live-verified on VM4 2026-06-04 — real tshark on `ens5` captured only pre-NAT client IPs; note: pcap must be written to `/tmp`, dumpcap drops privileges). See `handovers/handoff_zoom_refactor_phase4.md` for current progress.
 **Companion docs:** infrastructure in [`handoff_zoom_aws_setup.md`](./handoff_zoom_aws_setup.md); research scope/methodology in `Shane_Brodigan_24309940__Practicum_Internship_Part_2.pdf`.
 
 This document records the design for refactoring `sample_program/` from a single-machine
