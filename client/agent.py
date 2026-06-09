@@ -24,6 +24,7 @@ fakes and no real forking, sockets, or SDK.
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -35,6 +36,12 @@ from client.heartbeat import HeartbeatRecorder
 
 DEFAULT_POLL_INTERVAL_S = 5.0
 DEFAULT_AUDIO_PATH = "/tmp/librispeech_audio.pcm"
+
+# Optional override for this client's private IP. The roster is keyed on the VM's real
+# subnet IP (e.g. 10.0.1.119); auto-detection only returns that when the container shares
+# the host network (run with --network host). This env var is the safety valve when it
+# can't — set AGENT_IP to the VM's private IP and the agent uses it verbatim.
+ENV_AGENT_IP = "AGENT_IP"
 
 # A launcher starts the work for one session this client belongs to. Injectable so tests
 # can record calls instead of forking; the default forks a real bot child.
@@ -61,8 +68,12 @@ class Agent:
 
     @classmethod
     def from_env(cls, *, launch: Launcher | None = None) -> "Agent":
-        """Build for a VM: IAM-role S3 store and this host's auto-detected private IP."""
-        return cls(SessionStore(), detect_private_ip(), launch=launch)
+        """Build for a VM: IAM-role S3 store and this host's private IP.
+
+        The IP comes from ``AGENT_IP`` if set (the override for when the container can't
+        see the host network), otherwise it is auto-detected."""
+        ip = os.environ.get(ENV_AGENT_IP) or detect_private_ip()
+        return cls(SessionStore(), ip, launch=launch)
 
     # --- front door -------------------------------------------------------- #
 
