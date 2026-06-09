@@ -98,6 +98,32 @@ class SessionStore:
         """Fetch and parse a session's spec. Raises if it does not exist."""
         return Spec.from_dict(self._get_json(self.spec_key(session_id)))
 
+    def read_spec_with_anchor(self, session_id: str) -> tuple[Spec, float | None]:
+        """Fetch a spec together with its publish time — the session's t=0 anchor.
+
+        The anchor is the spec object's S3 ``LastModified``: the instant VM4 published
+        it, which by construction is when the call's timeline starts (the orchestrator
+        publishes the spec, then sleeps the call ``duration``). Because every client
+        reads the *same* object they all share one anchor, so the turn windows (which
+        are relative to t=0) line up across subnets without VM4 having to put an
+        absolute timestamp into the frozen contract. Comparing it to a client's own
+        clock relies on the chrony / AWS Time Sync alignment that is already a
+        prerequisite. Returns ``(spec, anchor_epoch)``."""
+        resp = self._client.get_object(Bucket=self.bucket, Key=self.spec_key(session_id))
+        spec = Spec.from_dict(json.loads(_read_body(resp["Body"])))
+        return spec, _to_epoch(resp.get("LastModified"))
+
+    def read_heartbeats_for_ip(self, session_id: str, ip: str) -> list[HeartbeatEvent]:
+        """Read just this client's own heartbeat file (empty list if not written yet).
+
+        Lets a writer merge its new event with what is already there, so the agent
+        (``launched``/``failed``) and the bot (``joined``/``left``) — both writing this
+        one IP's file from different processes — don't clobber each other."""
+        key = self.heartbeat_key(session_id, ip)
+        if not self._object_exists(key):
+            return []
+        return [HeartbeatEvent.from_dict(e) for e in self._get_json(key)]
+
     def spec_exists(self, session_id: str) -> bool:
         return self._object_exists(self.spec_key(session_id))
 
@@ -157,6 +183,18 @@ class SessionStore:
 def _read_body(body: Any) -> bytes:
     """boto3 returns a streaming body with .read(); the fake returns bytes directly."""
     return body.read() if hasattr(body, "read") else body
+
+
+def _to_epoch(value: Any) -> float | None:
+    """Normalize an S3 ``LastModified`` to epoch seconds.
+
+    Real boto3 hands back a timezone-aware ``datetime``; the in-memory test fake
+    returns a plain float. ``None`` (a deficient response) passes through as ``None``."""
+    if value is None:
+        return None
+    if hasattr(value, "timestamp"):
+        return value.timestamp()
+    return float(value)
 
 
 def _make_boto3_client(region_name: str) -> Any:

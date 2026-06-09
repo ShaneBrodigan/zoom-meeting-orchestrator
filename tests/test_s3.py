@@ -33,14 +33,24 @@ class FakeS3:
 
     def __init__(self):
         self.objects: dict[str, bytes] = {}
+        self.last_modified: dict[str, float] = {}
+        self._clock = 1000.0  # an increasing stand-in for object LastModified
+
+    def _stamp(self, Key):
+        self._clock += 1.0
+        self.last_modified[Key] = self._clock
 
     def put_object(self, Bucket, Key, Body, ContentType=None):
         self.objects[Key] = Body if isinstance(Body, bytes) else Body.encode()
+        self._stamp(Key)
 
     def get_object(self, Bucket, Key):
         if Key not in self.objects:
             raise KeyError(f"NoSuchKey: {Key}")
-        return {"Body": io.BytesIO(self.objects[Key])}
+        # Real boto3 includes LastModified on the get response; mirror that so the
+        # spec-anchor read (read_spec_with_anchor) can be exercised without AWS.
+        return {"Body": io.BytesIO(self.objects[Key]),
+                "LastModified": self.last_modified.get(Key)}
 
     def head_object(self, Bucket, Key):
         if Key not in self.objects:
@@ -61,6 +71,7 @@ class FakeS3:
     def upload_file(self, local_path, Bucket, Key):
         with open(local_path, "rb") as f:
             self.objects[Key] = f.read()
+        self._stamp(Key)
 
     def download_file(self, Bucket, Key, local_path):
         with open(local_path, "wb") as f:
@@ -111,6 +122,26 @@ def test_spec_exists():
     assert store.spec_exists("sess-001") is False
     store.publish_spec(make_spec())
     assert store.spec_exists("sess-001") is True
+
+
+def test_read_spec_with_anchor_returns_publish_time():
+    store, _ = make_store()
+    spec = make_spec()
+    store.publish_spec(spec)
+    got, anchor = store.read_spec_with_anchor("sess-001")
+    assert got == spec
+    # The anchor is the spec object's LastModified (the publish instant), a real number.
+    assert isinstance(anchor, float)
+
+
+def test_read_heartbeats_for_ip_empty_then_populated():
+    store, _ = make_store()
+    assert store.read_heartbeats_for_ip("sess-001", "10.0.1.119") == []
+    store.write_heartbeats("sess-001", "10.0.1.119", [
+        HeartbeatEvent(schema.EVENT_JOINED, "10.0.1.119", 100.0),
+    ])
+    events = store.read_heartbeats_for_ip("sess-001", "10.0.1.119")
+    assert [e.event for e in events] == [schema.EVENT_JOINED]
 
 
 def test_published_spec_is_valid_json_at_expected_key():
