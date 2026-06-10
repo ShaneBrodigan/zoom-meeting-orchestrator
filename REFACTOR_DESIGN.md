@@ -2,7 +2,7 @@
 
 **Project:** MSc AI Thesis — Classifying Encrypted Zoom VoIP Traffic
 **Student:** Shane Brodigan, x24309940, National College of Ireland
-**Status:** Design converged (grill-me session, 2026-06-02). Implementation in progress — Phase 1 + Phase 2a–2g done (`common/s3.py` verified against real AWS 2026-06-03; `meeting_scheduler.py` 2e live-verified 2026-06-04; `capture.py` 2f live-verified on VM4 2026-06-04 — real tshark on `ens5` captured only pre-NAT client IPs; note: pcap must be written to `/tmp`, dumpcap drops privileges). `orchestrator/session_orchestrator.py` 2g **built + unit-verified + live-verified on VM4 2026-06-08** (the VM4 conductor; 87 tests pass; live plumbing run `sess-20260608T150024Z-456d` created+ended a real meeting and wrote spec/manifest/pcap to S3 — 0 captured packets as expected with the client VMs down). A grill-me pass that day refined §4 (recorded pre/post-roll) and decision 10 (noise is an independent record, not a spec trigger). **Next: Phase 3 — the client side (`client/agent.py` + slimmed `client/bot.py` + `heartbeat.py`), then the first real 2-party call.** See `handovers/handoff_zoom_refactor_phase5.md` for current progress.
+**Status:** Design converged (grill-me session, 2026-06-02). Implementation in progress — Phase 1 + Phase 2a–2g done (`common/s3.py` verified against real AWS 2026-06-03; `meeting_scheduler.py` 2e live-verified 2026-06-04; `capture.py` 2f live-verified on VM4 2026-06-04 — real tshark on `ens5` captured only pre-NAT client IPs; note: pcap must be written to `/tmp`, dumpcap drops privileges). `orchestrator/session_orchestrator.py` 2g **built + unit-verified + live-verified on VM4 2026-06-08** (the VM4 conductor; live plumbing run `sess-20260608T150024Z-456d` — 0 captured packets as expected with the client VMs down). A grill-me pass that day refined §4 (recorded pre/post-roll) and decision 10 (noise is an independent record, not a spec trigger). **Phase 3 — the client side (`client/agent.py` + slimmed `client/bot.py` + `client/heartbeat.py`) — built + unit-verified AND the first end-to-end 2-party no-noise call LIVE-VERIFIED on AWS 2026-06-09** (105 tests pass; session `sess-20260609T150600Z-9bda` — VM1 host + VM2 joiner joined as distinct participants [host with zak, joiner without], real `joins_leaves` timestamps in the manifest, 28 MB / 24,371-packet pcap with pre-NAT client IPs + Zoom relay downlink; VM3 idle as a negative control; turn-sync t=0 = spec publish time via `read_spec_with_anchor`). **Step 4 — 3-party — LIVE-VERIFIED on AWS 2026-06-10** (session `sess-20260610T105421Z-0d1f`; VM1 host + VM2 + VM3 joiners, three populated `joins_leaves` with a real ~39 s three-party overlap window, all three left within 0.02 s on the REST hard-stop; pcap 29,485 packets with all three pre-NAT client IPs [`10.0.1.119`/`10.0.2.67`/`10.0.3.53`] + Zoom relay downlink, no `10.0.0.7` twins or SSH; manifest+pcap both clean). **§7 step 5 — VM5 iperf noise — design CONVERGED via grill-me 2026-06-10 (decision 10 + §7 step 5 below; full record in `handovers/handoff_zoom_refactor_phase8.md`); next is to implement it (`client/noise.py` + a shared `NoiseConfig` in `common/`), then step 6 the offline labeler.** See the newest file in `handovers/` for current progress, and `launch-guide.md` for the run procedure.
 **Companion docs:** infrastructure in [`handoff_zoom_aws_setup.md`](./handoff_zoom_aws_setup.md); research scope/methodology in `Shane_Brodigan_24309940__Practicum_Internship_Part_2.pdf`.
 
 This document records the design for refactoring `sample_program/` from a single-machine
@@ -133,6 +133,47 @@ The refactor is therefore architectural, not a config tweak.
     *records* what VM5 is doing (for 5-tuple separability) but never *starts* it; since the recorded
     pre-roll precedes the spec, a spec-triggered noise could never cover it anyway. The orchestrator
     (VM4) does not launch or stop noise.
+    **Converged implementation design (grill-me 2026-06-10; full record in
+    `handovers/handoff_zoom_refactor_phase8.md`):**
+    - *Generated live on VM5, NOT offline pcap-merged.* An alternative — merge the real Zoom capture with
+      an existing real-world background pcap (e.g. `mergecap`) for richer real background — was **rejected**:
+      it splices two different capture vantages (different NAT/MTU/TTL/clock → "which camera filmed this"
+      artifacts a model cheats on), has **no real co-existence** (independent timelines laid on top of each
+      other, none of the real shared-link/NAT interference that is the whole point), and needs IP-rewriting
+      (forbidden). The Zoom traffic is already 100% real; noise is only a confounder, so we keep it live
+      (real link/NAT/timing, one camera) and accept less behavioural variety rather than buy variety with
+      capture artifacts.
+    - *iperf now; traffic profile pluggable later.* iperf packets are real; only their *behaviour* is
+      synthetic. Adequate for the silence-shortcut job **provided the noise is varied**. Build iperf
+      concretely now, keep the schedule loop separate from the iperf call so a real-app profile
+      (curl/wget pulls, a video stream) can be added later — **do not pre-build a plugin layer** (no
+      swappable layer until a 2nd real profile). Document iperf as a known, defensible scoping limitation.
+    - *Dedicated internet iperf server (outside the VPC).* VM5 (iperf client) → VM4 NAT → internet server,
+      so noise crosses the edge like real background traffic and appears on `ens5` pre-NAT as
+      `10.0.4.16 → <server>`. A stable server IP/ports give the labeler a clean anchor. (Free fallback: an
+      iperf server on a private VM — but then the destination never leaves to the internet.)
+    - *Standalone program, not the agent.* `noise.py` is its own front door (`python -m client.noise`,
+      own container), started once at provisioning and left running. The agent already ignores
+      `zoom_role: none`, so it never starts noise — keeping the agent single-purpose.
+    - *Seeded random burst/idle loop.* iperf has no scheduler (one transfer then exits), so `noise.py`
+      loops: draw random burst length/rate/protocol(TCP|UDP)/port/direction from configured ranges → run
+      one iperf → idle a random gap → repeat. Seeded (reproducible), varied (no single learnable
+      signature), session-independent (covers pre-roll/gaps/post-roll).
+    - *Label noise by destination IP — keep raw IPs out of features.* The offline labeler tags
+      `src=10.0.4.16 & dst=<iperf server>` as noise (survives per-burst randomization; no VM5 heartbeats
+      needed). This does **not** teach the model "that IP = noise" because **labeling (the researcher's
+      offline answer key, may use oracle knowledge) is separate from features (model inputs)**; raw IPs are
+      excluded/anonymized as features — the *same hygiene must apply to the Zoom relay IPs*
+      (`170.114.*`/`144.195.*`), which are equally memorizable. Models must classify by traffic *shape*,
+      not endpoint addresses.
+    - *One config in S3 = single source of truth (`config/noise.json`).* Holds the iperf endpoint/ports +
+      rate/burst/gap ranges + seed. VM5 reads it to **run**; VM4 reads it to **stamp** the `noise` block
+      into each spec/manifest, so the recorded label and the actual traffic cannot drift (a wrong anchor
+      would mislabel noise invisibly). Reading a static infra config is not the per-session spec, so
+      "never spec-triggered" still holds.
+    - *Continuous; manual stop; `--restart=always`; no runtime cap* (a fixed runtime would itself be a
+      pattern). *Single source IP now*, structured so extra ENIs are a later flip. *Parameter values are
+      tunable in `config/noise.json`*, not hard-coded.
 
 11. **Build scope — n-participants now; phased validation.**
     VM1/VM2/VM3 are all Docker-ready (the handoff was stale: VM3 *is* provisioned like VM1/VM2).
@@ -147,6 +188,9 @@ The refactor is therefore architectural, not a config tweak.
 ```
 s3://zoom-bot-dataset-s3/
   input_audio/librispeech_audio.pcm              # shared source (do not bake into image)
+  config/noise.json                              # single source of truth for VM5 noise (decision 10):
+                                                 #   VM5 reads it to RUN noise; VM4 reads it to STAMP the
+                                                 #   spec/manifest noise block. NOT per-session, never a trigger.
   sessions/{session_id}/
     spec.json                                     # VM4 -> clients
     heartbeats/{ip}.json                          # each agent/bot -> VM4
@@ -225,11 +269,12 @@ Offline (versioned, no AWS):
 | | `capture.py` | tshark start/stop wrapper + the BPF filter. |
 | | `turn_schedule.py` | seeded turn-schedule generator. |
 | | `manifest.py` | merge spec + heartbeats + capture metadata -> raw-facts manifest. |
-| `client/` (VM1/2/3/5) | `agent.py` | poll S3, match IP, fork child / run noise. |
+| `client/` (VM1/2/3/5) | `agent.py` | poll S3, match IP, fork **bot** child. Ignores `none`/noise entries — noise is not spec-triggered (decision 10). |
 | | `bot.py` | slimmed `meeting_bot.py` (minimal VoIP participant). |
 | | `heartbeat.py` | write heartbeat events to S3. |
-| | `noise.py` | iperf profile wrapper. |
-| `common/` | `schema.py` | spec/manifest dataclasses — **the frozen contract.** |
+| | `noise.py` (VM5) | **standalone** seeded burst/idle iperf load generator (decision 10). Own front door (`python -m client.noise`), runs forever independent of any spec; clock + iperf-command edges injected for testing. |
+| `common/` | `schema.py` | spec/manifest dataclasses (incl. `NoiseBlock`) — **the frozen contract.** Pure shapes, no AWS. |
+| | `noise_config.py` | shared `NoiseConfig`: reads `config/noise.json`; maps into the spec `NoiseBlock`. Read by VM5 (to run) **and** VM4 (to record) — single source of truth (decision 10). |
 | | `s3.py` | S3 helpers (boto3 via instance-profile IAM role). |
 | `labeler/` (offline) | `derive_labels.py` | timeline + flow labels from manifest + pcap. |
 
@@ -258,7 +303,14 @@ the `audio - delete later/` directory.
 2. Orchestrator: meeting + spec + tshark + manifest (no bots). 2-party.
 3. Client agent + slimmed bot; **first end-to-end 2-party no-noise** call (handoff open task #4).
 4. 3-party (VM3 joins).
-5. Add VM5 iperf noise (separate-VM; flows separate by source IP).
+5. Add VM5 iperf noise — **design converged (grill-me 2026-06-10, decision 10).** Build a **shared
+   `common` `NoiseConfig`** (reads `config/noise.json`, maps into the spec `NoiseBlock`) + a **standalone
+   `client/noise.py`** (seeded burst/idle iperf loop, clock + iperf-command edges injected) + a small
+   VM4-side helper so the driver builds VM5's `NoiseBlock` from the same config (`session_orchestrator.py`
+   unchanged). Tests: seed→known schedule, params in range, iperf command line for TCP/UDP/reverse,
+   `NoiseConfig`↔`NoiseBlock` round-trip. Noise generated **live on VM5** (not offline-merged), to a
+   **dedicated internet iperf server**; labeler separates flows by **destination IP**. Infra prereqs
+   (Shane): internet iperf server (SG TCP+UDP open), Docker+iperf3 on VM5, `config/noise.json` in S3.
 6. Offline labeler.
 7. **Future:** concurrent iperf on VoIP VMs (flip `noise.enabled`; capture real mixed traffic);
    multi-ENI source IPs on VM5; `media_profile: audiovideo` class.

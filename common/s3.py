@@ -26,11 +26,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from common.noise_config import NoiseConfig
 from common.schema import HeartbeatEvent, Manifest, Spec
 
 DEFAULT_BUCKET = "zoom-bot-dataset-s3"
 DEFAULT_REGION = "eu-west-1"
 AUDIO_SOURCE_KEY = "input_audio/librispeech_audio.pcm"
+# Single source of truth for VM5 noise (decision 10): NOT per-session, lives outside
+# sessions/. VM5 reads it to run noise; VM4 reads it to stamp the spec/manifest.
+NOISE_CONFIG_KEY = "config/noise.json"
 
 
 class SessionStore:
@@ -150,6 +154,15 @@ class SessionStore:
     def download_audio_source(self, local_path: str, *, key: str = AUDIO_SOURCE_KEY) -> None:
         """Fetch the shared LibriSpeech source file to a local path."""
         self._client.download_file(self.bucket, key, local_path)
+
+    # --- shared infra config (read by both VM5 and VM4) -------------------- #
+
+    def read_noise_config(self) -> NoiseConfig:
+        """Read ``config/noise.json``, the single source of truth for VM5 noise.
+
+        Not a per-session file: VM5 reads it to run the noise loop, VM4 reads it to
+        stamp the matching ``noise`` block into each spec/manifest (decision 10)."""
+        return NoiseConfig.from_dict(self._get_json(NOISE_CONFIG_KEY))
 
     # --- low-level helpers (the only spots that talk to the client) -------- #
 

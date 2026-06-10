@@ -2,8 +2,8 @@
 **Project:** MSc AI Thesis — Classifying Encrypted Zoom VoIP Traffic
 **Student:** Shane Brodigan, x24309940, National College of Ireland
 **Date:** 2026-06-02
-**Current State:** Infrastructure complete and verified. VMs stopped to save cost. Refactor **in progress** — Phase 1 + Phase 2a–2g done; `common/s3.py` verified against real AWS on VM4 (2026-06-03, surfaced+fixed the IAM object-ARN bug in the IAM section below); `orchestrator/meeting_scheduler.py` (2e) live-verified on VM4 (2026-06-04). `orchestrator/capture.py` (2f) **live-verified on VM4 (2026-06-04)** — real tshark on `ens5` captured only pre-NAT client IPs; surfaced the dumpcap `/tmp` write-path requirement noted below. `orchestrator/session_orchestrator.py` (2g), the VM4 conductor, **built + unit-verified + live-verified on VM4 2026-06-08** (87 tests pass; live plumbing run `sess-20260608T150024Z-456d` created+ended a real meeting and wrote spec/manifest/pcap to S3 — 0 packets as expected with the client VMs down).
-**Next Session Focus:** Continue the refactor per `handovers/handoff_zoom_refactor_phase5.md` — next is **Phase 3, the client side** (`client/agent.py` + slimmed `client/bot.py` + `heartbeat.py`), then the first real 2-party call. NOTE (learned 2026-06-08): VM4 had no repo — the now-public repo was cloned fresh to `~/zoom-meeting-orchestrator` (run from the repo root; `common/`+`orchestrator/` are at root there). `.env` is gitignored so a fresh clone lacks it — recreate with the `ZOOM_S2S_*` values. Deps: boto3+requests already in system python3, but `python-dotenv` was missing and pip is absent — `sudo apt-get install -y python3-dotenv`.
+**Current State:** Infrastructure complete and verified. Refactor **in progress** — Phase 1 + Phase 2a–2g done; `common/s3.py` verified against real AWS on VM4 (2026-06-03, surfaced+fixed the IAM object-ARN bug in the IAM section below); `orchestrator/meeting_scheduler.py` (2e) live-verified on VM4 (2026-06-04). `orchestrator/capture.py` (2f) **live-verified on VM4 (2026-06-04)** — real tshark on `ens5` captured only pre-NAT client IPs; surfaced the dumpcap `/tmp` write-path requirement noted below. `orchestrator/session_orchestrator.py` (2g), the VM4 conductor, **built + unit-verified + live-verified on VM4 2026-06-08** (live plumbing run — 0 packets as expected with the client VMs down). **Phase 3 (the `client/` package) built + unit-verified, and the first end-to-end 2-party no-noise call LIVE-VERIFIED 2026-06-09** (session `sess-20260609T150600Z-9bda`: VM1 host + VM2 joiner joined as distinct participants, real `joins_leaves` in the manifest, 28 MB / 24,371-packet pcap with pre-NAT client IPs `10.0.1.119`/`10.0.2.67` + Zoom relay downlink; VM3 idle negative control; capture filter clean — no `10.0.0.7`/SSH). **3-party LIVE-VERIFIED 2026-06-10** (session `sess-20260610T105421Z-0d1f`: VM1 host + VM2 + VM3 joiners, three populated `joins_leaves` with a real ~39 s three-party overlap, all three left within 0.02 s on the REST hard-stop; pcap 29,485 packets, all three pre-NAT client IPs present, no `10.0.0.7` twins/SSH). **§7 step 5 (VM5 iperf noise) design converged via grill-me 2026-06-10** — see `handovers/handoff_zoom_refactor_phase8.md` + `REFACTOR_DESIGN.md` decision 10; implementation pending. VMs normally stopped to save cost.
+**Next Session Focus:** Continue the refactor per the newest file in `handovers/` — next is to **implement VM5 iperf noise** (design now converged: `client/noise.py` standalone seeded burst/idle iperf loop + a shared `common` `NoiseConfig` from `config/noise.json`; noise live on VM5 to a **dedicated internet iperf server**, labeled by destination IP — see `handoff_zoom_refactor_phase8.md` + `REFACTOR_DESIGN.md` decision 10), then the offline labeler. Live-run infra prereqs: Docker + iperf3 on VM5, the internet iperf server (SG open TCP+UDP), and `config/noise.json` in S3 (see Open Tasks). See **`launch-guide.md`** (repo root) for the step-by-step run procedure. NOTE: the repo is cloned to `~/zoom-meeting-orchestrator` on **all** VMs (VM4 runs the orchestrator natively; VM1/VM2/VM3 run the agent inside the SDK Docker image with `--network host`). `.env` is gitignored so a fresh clone lacks it — recreate it: VM4 needs `ZOOM_S2S_*`, the client VMs need `ZOOM_APP_CLIENT_ID`/`ZOOM_APP_CLIENT_SECRET`. VM4 deps: boto3+requests already in system python3, `sudo apt-get install -y python3-dotenv` (pip absent). The client container needs `pip install boto3 zoom-meeting-sdk` (not baked into the image).
 
 For research scope, model rationale, evaluation methodology, and the topology diagram, see the methodology paper at `Shane_Brodigan_24309940__Practicum_Internship_Part_2.pdf`. **This document covers the deployed infrastructure only.** The bot programme design, S3 contract, orchestration flow, and the (now-resolved) open design questions live in [`REFACTOR_DESIGN.md`](./REFACTOR_DESIGN.md).
 
@@ -87,7 +87,7 @@ Because VM4 is a **single-ENI** NAT instance, `ens5` sees **two copies of every 
 
 ### S3
 - **Bucket:** `zoom-bot-dataset-s3` (eu-west-1)
-- **Folders:** `input_audio/` (contains `librispeech_audio.pcm`, a 1GB trimmed subset of LibriSpeech train-clean-100), `sessions/` (populated at runtime, one folder per call session)
+- **Folders:** `input_audio/` (contains `librispeech_audio.pcm`, a 1GB trimmed subset of LibriSpeech train-clean-100), `sessions/` (populated at runtime, one folder per call session), `config/noise.json` (single source of truth for VM5 noise — iperf endpoint/ports + ranges + seed; VM5 reads it to run, VM4 reads it to record into the spec/manifest. To be created when the noise generator goes live — see `REFACTOR_DESIGN.md` decision 10)
 - **VPC Gateway Endpoint:** Configured so EC2 → S3 traffic stays on AWS internal network (free, no NAT bandwidth used)
 
 ### IAM
@@ -122,10 +122,15 @@ The client VMs cannot be SSH'd into directly from the internet — they have no 
 > fine to **`/tmp`** (mode 1777). Not AppArmor (`dmesg | grep -i denied` empty). **Always write session
 > pcaps to a `/tmp` path** (a root-created `/tmp` subdir is 755 and re-breaks it — capture directly into
 > `/tmp` or make the subdir `1777`). Confirmed 2026-06-04 live-verifying `orchestrator/capture.py`.
-| VM1 | Docker CE + Compose plugin (official Docker apt repo, not snap/docker.io). User `ubuntu` is in `docker` group. |
-| VM2 | Same as VM1 |
-| VM3 | Docker CE + Compose plugin (official Docker apt repo). Provisioned identically to VM1/VM2 — ready as 3-party joiner. |
-| VM5 | Noise node. Docker + iperf install pending; additional ENIs not yet attached. Sole iperf noise generator for now (more noise sources may be added later, incl. concurrent iperf on VM1/2/3). |
+| VM1 | Docker CE + Compose plugin (official Docker apt repo, not snap/docker.io). User `ubuntu` is in `docker` group. Repo cloned to `~/zoom-meeting-orchestrator`; `zoom-agent` SDK image built (2026-06-09); ran the host bot. |
+| VM2 | Same as VM1; ran the joiner bot (2026-06-09). |
+| VM3 | Same as VM1; `zoom-agent` image built, agent run as a negative control 2026-06-09 (idle — not in the 2-party roster). Ready as 3-party joiner. |
+| VM5 | Noise node — runs the **standalone** `client/noise.py` (iperf *client*) independently of any session; not in the agent poll loop. Docker + iperf3 install pending; additional ENIs not yet attached. The iperf *server* is a **separate dedicated internet host outside the VPC** (not VM5). Sole iperf noise generator for now (more noise sources may be added later, incl. concurrent iperf on VM1/2/3). |
+
+> The client container runs with `--network host` (needed so boto3 reaches the instance-role creds via
+> IMDS, and so the agent auto-detects the VM's real private IP). `boto3` + `zoom-meeting-sdk` are
+> `pip install`ed inside the container per run — they are **not** baked into the image. See
+> `launch-guide.md` for the full client launch procedure.
 
 The official Docker repo install is intentional. Ubuntu's `docker.io` package lags behind, and the snap version has known container networking issues that affect bots needing to bind to ALSA/Pulse.
 
@@ -140,17 +145,27 @@ The official Docker repo install is intentional. Ubuntu's `docker.io` package la
 - NAT config survives VM4 stop/start cycle
 - Docker `hello-world` succeeds on VM1, VM2, and VM3 (confirms NAT-mediated pulls from Docker Hub work; VM3 provisioned identically to VM1/VM2)
 - tshark captures cleanly on `ens5` with both raw `-i ens5` and BPF filters
+- **chrony / AWS Time Sync confirmed on VM1, VM2, VM3, VM4 (2026-06-09)** — `chronyc tracking` showed `169.254.169.123`, sub-ms offsets. (VM5 still to confirm when it runs.)
+- **First end-to-end 2-party call captured (2026-06-09, `sess-20260609T150600Z-9bda`):** VM1 host + VM2 joiner joined as distinct participants; the tshark capture filter grabbed real pre-NAT client media (`10.0.1.119`, `10.0.2.67`) + Zoom relay downlink, 28 MB / 24,371 packets, no `10.0.0.7` twins or SSH; manifest `joins_leaves` populated. Confirms the whole pre-NAT capture + per-participant attribution chain end to end.
+- **3-party call captured (2026-06-10, `sess-20260610T105421Z-0d1f`):** VM1 host + VM2 + VM3 joiners, three populated `joins_leaves` (real ~39 s three-party overlap window; all three left within 0.02 s on VM4's REST meeting-end); pcap 29,485 packets with all three pre-NAT client IPs (`10.0.1.119` 65.95%, `10.0.3.53` 17.83%, `10.0.2.67` 16.22%) outbound + Zoom relay (`170.114.45.1`, `144.195.37.123`) downlink, no `10.0.0.7` twins or SSH. Step 4 done — code unchanged from 2-party (one-line roster edit only).
 
 ---
 
 ## Open Tasks (post-refactor)
 
-1. Build/pull the `py-zoom-meeting-sdk` image on VM1, VM2, VM3 (image structure now settled in `REFACTOR_DESIGN.md` §9: single container polls S3, forks a child per session)
-2. Install Docker + iperf on **VM5** (VM3 is already Docker-provisioned)
-3. Attach additional ENIs to VM5 for multi-IP noise generation (noise should appear to come from multiple distinct source IPs to be realistic)
-4. First end-to-end 2-party call: VM1 host, VM2 joiner, tshark capturing on VM4, session manifest written to S3
-5. Scale to 3-party (VM3 joins), then add VM5 noise at varying intensities; later, concurrent iperf on the VoIP VMs (real mixed traffic, not synthesized)
-6. Confirm **chrony / AWS Time Sync** is enabled on all 5 VMs (label timestamp alignment — see Capture Vantage Point above)
+1. ~~Build the `py-zoom-meeting-sdk` image on VM1, VM2, VM3~~ **DONE 2026-06-09** (`zoom-agent` image built on all three; the container runs the agent which forks a bot child per session).
+2. **VM5 noise live-run prerequisites** (design converged 2026-06-10 — `REFACTOR_DESIGN.md` decision 10):
+   - Install **Docker + iperf3 on VM5** (VM3 is already Docker-provisioned).
+   - Stand up the **dedicated internet iperf server** (a tiny host *outside* the VPC): note its public IP,
+     run `iperf3 -s` on each port in the chosen port set (persistent — systemd or `--restart=always`), and
+     open those ports for **both TCP and UDP** in its security group. (`noise.py` runs one burst at a time,
+     so one server instance per port is enough — no concurrency.)
+   - Create **`config/noise.json`** in `s3://zoom-bot-dataset-s3/` (iperf server IP/ports + rate/burst/gap
+     ranges + seed) — the single source of truth read by both VM5 and VM4.
+3. Attach additional ENIs to VM5 for multi-IP noise generation (noise should appear to come from multiple distinct source IPs to be realistic) — *deferred; the noise build targets a single source IP now, structured so this is a later flip.*
+4. ~~First end-to-end 2-party call: VM1 host, VM2 joiner, tshark on VM4, manifest to S3~~ **DONE 2026-06-09** (`sess-20260609T150600Z-9bda`; see Verified Behaviour).
+5. ~~Scale to 3-party~~ **DONE 2026-06-10** (`sess-20260610T105421Z-0d1f`; one-line roster edit, code unchanged). **Next:** add VM5 noise at varying intensities; later, concurrent iperf on the VoIP VMs (real mixed traffic, not synthesized).
+6. ~~Confirm **chrony / AWS Time Sync**~~ confirmed on VM1–VM4 (2026-06-09); **VM5 still to confirm when it runs**.
 7. **Cleanup:** Delete the VPC Flow Log + CloudWatch log group `vpc-flow-logs-debug` (created during NAT debug, never deleted — small ongoing CloudWatch costs)
 
 ---
