@@ -23,6 +23,10 @@ sample_program/__pycache__
 src/zoom_meeting_sdk/__pycache__/
 .env
 
+# Downloaded session fixtures for the offline labeler (pcaps are tens of MB;
+# labels.json is regenerable from manifest + pcap)
+/sessions/
+
 # Python caches and tooling (covers every package, not just the two above)
 __pycache__/
 *.py[cod]
