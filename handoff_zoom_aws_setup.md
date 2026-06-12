@@ -1,4 +1,4 @@
-# Handoff Document — Zoom VoIP Dataset Generation Infrastructure
+/co# Handoff Document — Zoom VoIP Dataset Generation Infrastructure
 **Project:** MSc AI Thesis — Classifying Encrypted Zoom VoIP Traffic
 **Student:** Shane Brodigan, x24309940, National College of Ireland
 **Date:** 2026-06-02
@@ -87,7 +87,7 @@ Because VM4 is a **single-ENI** NAT instance, `ens5` sees **two copies of every 
 
 ### S3
 - **Bucket:** `zoom-bot-dataset-s3` (eu-west-1)
-- **Folders:** `input_audio/` (contains `librispeech_audio.pcm`, a 1GB trimmed subset of LibriSpeech train-clean-100), `sessions/` (populated at runtime, one folder per call session), `config/noise.json` (single source of truth for VM5 noise — iperf endpoint/ports + ranges + seed; VM5 reads it to run, VM4 reads it to record into the spec/manifest. To be created when the noise generator goes live — see `REFACTOR_DESIGN.md` decision 10)
+- **Folders:** `input_audio/` (contains `librispeech_audio.pcm`, a 1GB trimmed subset of LibriSpeech train-clean-100), `sessions/` (populated at runtime, one folder per call session), `config/noise.json` (single source of truth for VM5 noise — iperf endpoint/ports + ranges + seed; VM5 reads it to run, VM4 reads it to record into the spec/manifest. **Created 2026-06-12**: `target=108.132.222.246` + ports `5201,5202,5203` TCP/UDP, rate `1.0–50.0` Mbps; see `REFACTOR_DESIGN.md` decision 10)
 - **VPC Gateway Endpoint:** Configured so EC2 → S3 traffic stays on AWS internal network (free, no NAT bandwidth used)
 
 ### IAM
@@ -125,7 +125,8 @@ The client VMs cannot be SSH'd into directly from the internet — they have no 
 | VM1 | Docker CE + Compose plugin (official Docker apt repo, not snap/docker.io). User `ubuntu` is in `docker` group. Repo cloned to `~/zoom-meeting-orchestrator`; `zoom-agent` SDK image built (2026-06-09); ran the host bot. |
 | VM2 | Same as VM1; ran the joiner bot (2026-06-09). |
 | VM3 | Same as VM1; `zoom-agent` image built, agent run as a negative control 2026-06-09 (idle — not in the 2-party roster). Ready as 3-party joiner. |
-| VM5 | Noise node — runs the **standalone** `client/noise.py` (iperf *client*) independently of any session; not in the agent poll loop. Docker + iperf3 install pending; additional ENIs not yet attached. The iperf *server* is a **separate dedicated internet host outside the VPC** (not VM5). Sole iperf noise generator for now (more noise sources may be added later, incl. concurrent iperf on VM1/2/3). |
+| VM5 | Noise node — runs the **standalone** `client/noise.py` (iperf *client*) independently of any session; not in the agent poll loop. **Provisioned natively 2026-06-12** (no Docker): `iperf3` + `python3-boto3` installed, repo cloned to `~/zoom-meeting-orchestrator`, S3 read via instance role confirmed, chrony locked to `169.254.169.123` (~4 µs offset). Additional ENIs not yet attached. The iperf *server* is the **separate `iperf-server` host outside the VPC** at EIP `108.132.222.246` (see below; not VM5). Sole iperf noise generator for now (more noise sources may be added later, incl. concurrent iperf on VM1/2/3). |
+| **iperf-server** | **Noise-target host, OUTSIDE the capture VPC** (in the **default VPC**, eu-west-1, launched 2026-06-12). t3.micro, Ubuntu 24.04 LTS, key pair `zoom-capture-key`, **no IAM instance profile** (it never touches S3). **Elastic IP `108.132.222.246`** — stable across stop/start, and it is the `target` value in `config/noise.json`. SG `launch-wizard-1`: *inbound* SSH 22 from `0.0.0.0/0` + TCP & UDP 5201–5203 from VM4's EIP `34.242.98.206/32` (the post-NAT source of VM5's noise); *outbound* all traffic. `iperf3` installed; **3 persistent listeners running** (`iperf3@5201/5202/5203` systemd template, `enabled` so they survive reboot/stop-start) — DONE 2026-06-12. This host is the labeler's noise anchor (`src=10.0.4.16 & dst=108.132.222.246` → noise). |
 
 > The client container runs with `--network host` (needed so boto3 reaches the instance-role creds via
 > IMDS, and so the agent auto-detects the VM's real private IP). `boto3` + `zoom-meeting-sdk` are
@@ -145,7 +146,8 @@ The official Docker repo install is intentional. Ubuntu's `docker.io` package la
 - NAT config survives VM4 stop/start cycle
 - Docker `hello-world` succeeds on VM1, VM2, and VM3 (confirms NAT-mediated pulls from Docker Hub work; VM3 provisioned identically to VM1/VM2)
 - tshark captures cleanly on `ens5` with both raw `-i ens5` and BPF filters
-- **chrony / AWS Time Sync confirmed on VM1, VM2, VM3, VM4 (2026-06-09)** — `chronyc tracking` showed `169.254.169.123`, sub-ms offsets. (VM5 still to confirm when it runs.)
+- **chrony / AWS Time Sync confirmed on all 5 VMs** — VM1–VM4 (2026-06-09) and **VM5 (2026-06-12)**;
+  `chronyc tracking` showed `169.254.169.123`, sub-ms offsets (VM5 ~4 µs).
 - **First end-to-end 2-party call captured (2026-06-09, `sess-20260609T150600Z-9bda`):** VM1 host + VM2 joiner joined as distinct participants; the tshark capture filter grabbed real pre-NAT client media (`10.0.1.119`, `10.0.2.67`) + Zoom relay downlink, 28 MB / 24,371 packets, no `10.0.0.7` twins or SSH; manifest `joins_leaves` populated. Confirms the whole pre-NAT capture + per-participant attribution chain end to end.
 - **3-party call captured (2026-06-10, `sess-20260610T105421Z-0d1f`):** VM1 host + VM2 + VM3 joiners, three populated `joins_leaves` (real ~39 s three-party overlap window; all three left within 0.02 s on VM4's REST meeting-end); pcap 29,485 packets with all three pre-NAT client IPs (`10.0.1.119` 65.95%, `10.0.3.53` 17.83%, `10.0.2.67` 16.22%) outbound + Zoom relay (`170.114.45.1`, `144.195.37.123`) downlink, no `10.0.0.7` twins or SSH. Step 4 done — code unchanged from 2-party (one-line roster edit only).
 - **3-party call re-run + labeler live-validated (2026-06-12, `sess-20260612T103058Z-4e80`):** clean
@@ -165,17 +167,25 @@ The official Docker repo install is intentional. Ubuntu's `docker.io` package la
 
 1. ~~Build the `py-zoom-meeting-sdk` image on VM1, VM2, VM3~~ **DONE 2026-06-09** (`zoom-agent` image built on all three; the container runs the agent which forks a bot child per session).
 2. **VM5 noise live-run prerequisites** (design converged 2026-06-10 — `REFACTOR_DESIGN.md` decision 10):
-   - Install **Docker + iperf3 on VM5** (VM3 is already Docker-provisioned).
-   - Stand up the **dedicated internet iperf server** (a tiny host *outside* the VPC): note its public IP,
-     run `iperf3 -s` on each port in the chosen port set (persistent — systemd or `--restart=always`), and
-     open those ports for **both TCP and UDP** in its security group. (`noise.py` runs one burst at a time,
-     so one server instance per port is enough — no concurrency.)
-   - Create **`config/noise.json`** in `s3://zoom-bot-dataset-s3/` (iperf server IP/ports + rate/burst/gap
-     ranges + seed) — the single source of truth read by both VM5 and VM4.
+   - ~~Install **Docker + iperf3 on VM5**~~ **DONE 2026-06-12 — provisioned NATIVELY, no Docker.** Noise
+     doesn't use the Zoom SDK, so VM5 just needs `iperf3` + `python3-boto3` + the repo cloned to
+     `~/zoom-meeting-orchestrator`; running `python3 -m client.noise` natively gives it the real
+     `10.0.4.16` source IP and instance-role S3 access for free. Verified: `SessionStore().read_noise_config()`
+     read `config/noise.json` from S3 (target `108.132.222.246`) using the instance role.
+   - ~~Stand up the **dedicated internet iperf server** (a tiny host *outside* the VPC)~~ **DONE
+     2026-06-12** — `iperf-server` t3.micro in the **default VPC**, Elastic IP **`108.132.222.246`**, key
+     `zoom-capture-key`, no IAM role; SG `launch-wizard-1` opens TCP **and** UDP 5201–5203 from VM4's EIP
+     `34.242.98.206/32` (+ SSH 22). `iperf3` installed; 3 persistent listeners running via systemd template
+     `iperf3@5201/5202/5203` (`enabled`, one per port — `noise.py` runs one burst at a time, no concurrency).
+   - ~~Create **`config/noise.json`** in `s3://zoom-bot-dataset-s3/`~~ **DONE 2026-06-12** — uploaded with
+     `target=108.132.222.246`, `ports=[5201,5202,5203]`, `protocols=[tcp,udp]`, `rate_mbps=[1.0,50.0]`,
+     `burst_s=[2,10]`, `gap_s=[0.5,5.0]`, `reverse_prob=0.5`, `seed=4711`; validated on VM4 via
+     `SessionStore().read_noise_config().to_noise_block()` (loads clean, passes the rate-floor guard).
 3. Attach additional ENIs to VM5 for multi-IP noise generation (noise should appear to come from multiple distinct source IPs to be realistic) — *deferred; the noise build targets a single source IP now, structured so this is a later flip.*
 4. ~~First end-to-end 2-party call: VM1 host, VM2 joiner, tshark on VM4, manifest to S3~~ **DONE 2026-06-09** (`sess-20260609T150600Z-9bda`; see Verified Behaviour).
 5. ~~Scale to 3-party~~ **DONE 2026-06-10** (`sess-20260610T105421Z-0d1f`; one-line roster edit, code unchanged). **Next:** add VM5 noise at varying intensities; later, concurrent iperf on the VoIP VMs (real mixed traffic, not synthesized).
-6. ~~Confirm **chrony / AWS Time Sync**~~ confirmed on VM1–VM4 (2026-06-09); **VM5 still to confirm when it runs**.
+6. ~~Confirm **chrony / AWS Time Sync**~~ confirmed on VM1–VM4 (2026-06-09) **and VM5 (2026-06-12** —
+   `chronyc tracking` → `169.254.169.123`, ~4 µs offset). All 5 VMs confirmed.
 7. **Cleanup:** Delete the VPC Flow Log + CloudWatch log group `vpc-flow-logs-debug` (created during NAT debug, never deleted — small ongoing CloudWatch costs)
 
 ---
@@ -234,6 +244,11 @@ The downstream models (RF, GRU, ET-BERT) need flow-level features keyed by 5-tup
 
 - **Running (all 5 VMs):** ~$85/month (compute) + ~$5/month storage + ~$3.60/month EIP = ~$93/month
 - **Stopped (current state):** ~$5/month EBS + ~$3.60/month EIP + ~$0.02/month S3 = ~$9/month
+- **`iperf-server` (added 2026-06-12):** ~$7.50/month compute when running (t3.micro) + a second EIP at
+  ~$3.60/month. The EIP is billed even while the instance is **stopped** (AWS charges for an EIP attached
+  to a stopped instance), so stop *and* release it if the noise work is done for a while — but releasing
+  means a new IP, which would need `config/noise.json` + this doc updated. Negligible data-transfer-out
+  during a short test run.
 - **Variable:** S3 PUT/GET fees during dataset generation (minor at this scale)
 
 AWS now charges for public IPv4 addresses (~$3.60/month per EIP) regardless of whether the associated instance is running, since Feb 2024. Releasing the EIP would save this but means re-associating a new EIP next time, with a different IP — which would also require updating any local SSH configs and Zoom OAuth redirect URLs if applicable.

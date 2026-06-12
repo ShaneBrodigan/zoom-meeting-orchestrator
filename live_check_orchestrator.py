@@ -32,6 +32,7 @@ import os
 
 from dotenv import load_dotenv
 
+from common.s3 import SessionStore
 from common.schema import ROLE_HOST, ROLE_JOINER, ROLE_NONE, RosterEntry, Seeds
 from orchestrator.session_orchestrator import SessionConfig, SessionOrchestrator
 from orchestrator.timing import generate_timing
@@ -41,12 +42,17 @@ load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 
 def main() -> None:
-    # 2-party roster from the AWS setup doc: VM1 host (private1), VM2 joiner (private2).
+    # 3-party roster + VM5 iperf noise. VM5 (ROLE_NONE) never joins Zoom; its noise
+    # block (read from config/noise.json — the single source of truth) is recorded into
+    # the spec/manifest so the offline labeler can separate noise flows by destination
+    # IP. VM4 does NOT start noise — it runs independently on VM5 (decision 10).
+    noise = SessionStore().read_noise_config().to_noise_block()
     config = SessionConfig(
         roster=[
             RosterEntry(ip="10.0.1.119", zoom_role=ROLE_HOST),    # VM1
             RosterEntry(ip="10.0.2.67", zoom_role=ROLE_JOINER),   # VM2
             RosterEntry(ip="10.0.3.53", zoom_role=ROLE_JOINER),   # VM3
+            RosterEntry(ip="10.0.4.16", zoom_role=ROLE_NONE, noise=noise),  # VM5 noise
         ],
         seeds=Seeds(turns=4711, timing=9001),
     )
