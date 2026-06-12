@@ -160,13 +160,26 @@ The official Docker repo install is intentional. Ubuntu's `docker.io` package la
   `other` — NOT mislabeled as Zoom. Labeler validated on real traffic; no rule change needed.
   (Tooling note: VM4 ran the labeler after `git pull` + `sudo apt-get install -y python3-scapy` —
   pip is absent on VM4, so scapy comes from apt.)
+- **3-party call + VM5 iperf noise, end-to-end (2026-06-12, `sess-20260612T135535Z-23fa`):** the combined
+  run that closed §7 step 5. `client/noise.py` ran live on VM5 (seeded TCP/UDP bursts to `iperf-server`
+  `108.132.222.246`), confirmed flowing **pre-NAT** on `ens5` as `10.0.4.16 → 108.132.222.246`. 3-party
+  Zoom call captured alongside it (real `joins_leaves`, ~68 s three-party window). pcap clean under heavy
+  noise — sources were the 3 client IPs + Zoom relays + `10.0.4.16` (33k) + `108.132.222.246` (110k), **no
+  `10.0.0.7` twins / no SSH** (noise was ~80 % of packets, a tunable `rate_mbps` choice). Manifest had a
+  4-entry roster with VM5's populated noise block + 3 `joins_leaves` (VM5 never joins). Labeler (on VM4):
+  timeline `0→1→2→3→2→1→0`, flows `noise:24, zoom_media:39, zoom_signaling:107, other:35`; **all 24 noise
+  flows exactly `10.0.4.16 ↔ 108.132.222.246`, rule `noise-vm-to-iperf-server`, zero leakage, no warnings.**
+  Harness feature-complete for the `audio` profile.
 
 ---
 
 ## Open Tasks (post-refactor)
 
 1. ~~Build the `py-zoom-meeting-sdk` image on VM1, VM2, VM3~~ **DONE 2026-06-09** (`zoom-agent` image built on all three; the container runs the agent which forks a bot child per session).
-2. **VM5 noise live-run prerequisites** (design converged 2026-06-10 — `REFACTOR_DESIGN.md` decision 10):
+2. ~~**VM5 noise live-run prerequisites**~~ **ALL DONE 2026-06-12** — combined run
+   `sess-20260612T135535Z-23fa` succeeded; harness feature-complete for the `audio` profile (see
+   `handovers/handoff_zoom_refactor_phase12.md`). Prereq detail kept below for reference:
+   (design converged 2026-06-10 — `REFACTOR_DESIGN.md` decision 10):
    - ~~Install **Docker + iperf3 on VM5**~~ **DONE 2026-06-12 — provisioned NATIVELY, no Docker.** Noise
      doesn't use the Zoom SDK, so VM5 just needs `iperf3` + `python3-boto3` + the repo cloned to
      `~/zoom-meeting-orchestrator`; running `python3 -m client.noise` natively gives it the real
@@ -183,7 +196,10 @@ The official Docker repo install is intentional. Ubuntu's `docker.io` package la
      `SessionStore().read_noise_config().to_noise_block()` (loads clean, passes the rate-floor guard).
 3. Attach additional ENIs to VM5 for multi-IP noise generation (noise should appear to come from multiple distinct source IPs to be realistic) — *deferred; the noise build targets a single source IP now, structured so this is a later flip.*
 4. ~~First end-to-end 2-party call: VM1 host, VM2 joiner, tshark on VM4, manifest to S3~~ **DONE 2026-06-09** (`sess-20260609T150600Z-9bda`; see Verified Behaviour).
-5. ~~Scale to 3-party~~ **DONE 2026-06-10** (`sess-20260610T105421Z-0d1f`; one-line roster edit, code unchanged). **Next:** add VM5 noise at varying intensities; later, concurrent iperf on the VoIP VMs (real mixed traffic, not synthesized).
+5. ~~Scale to 3-party~~ **DONE 2026-06-10** (`sess-20260610T105421Z-0d1f`). ~~add VM5 noise~~ **DONE
+   2026-06-12** (`sess-20260612T135535Z-23fa`; 3-party + VM5 iperf noise, labeler separated noise cleanly).
+   **Next (future, §7 step 7):** concurrent iperf on the VoIP VMs (real mixed traffic, not synthesized);
+   multi-ENI source IPs on VM5; `media_profile: audiovideo` class.
 6. ~~Confirm **chrony / AWS Time Sync**~~ confirmed on VM1–VM4 (2026-06-09) **and VM5 (2026-06-12** —
    `chronyc tracking` → `169.254.169.123`, ~4 µs offset). All 5 VMs confirmed.
 7. **Cleanup:** Delete the VPC Flow Log + CloudWatch log group `vpc-flow-logs-debug` (created during NAT debug, never deleted — small ongoing CloudWatch costs)
