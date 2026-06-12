@@ -197,3 +197,18 @@ pgrep -a tshark; pgrep -a dumpcap        # should print nothing
 
 > **Tip:** to skip the per-run `pip install boto3 zoom-meeting-sdk` inside the container, add those two
 > packages to the `Dockerfile`'s pip line and rebuild `zoom-agent` once.
+
+> **Tip — don't re-scp the drivers every run.** `.env` and `live_check_agent.py` are untracked but live
+> on each VM's EBS disk, which **persists across stop/start** — once they're on a VM they stay there.
+> If you ever do need to (re)distribute them, fan out from VM4 in one loop instead of copying VM-by-VM:
+> ```
+> for vm in vm1 vm2 vm3; do scp ~/zoom-meeting-orchestrator/{.env,live_check_agent.py} $vm:~/zoom-meeting-orchestrator/; done
+> ```
+> (VM4 already has the key + `vm1/vm2/vm3` SSH aliases. Add `vm5` when running noise.)
+
+> **Tip — you can run the labeler on VM4** instead of the laptop (VM4 has S3 via its instance role, so
+> no laptop AWS CLI needed). One-time on VM4: `git pull` (brings in `labeler/`; the untracked
+> `live_check_*.py`/`.env` don't conflict) and `sudo apt-get install -y python3-scapy` (**pip is absent
+> on VM4 — use apt**). Then, from the repo root: download the session
+> (`aws s3 cp s3://zoom-bot-dataset-s3/sessions/<id>/ sessions/<id>/ --recursive`) and run
+> `python3 -m labeler.derive_labels sessions/<id>`.
