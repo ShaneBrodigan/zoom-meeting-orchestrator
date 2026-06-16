@@ -61,6 +61,22 @@ sudo tcpdump -i ens5 -n host 10.0.4.16 and not tcp port 22 -c 5    # expect 10.0
 (Prereqs — all done 2026-06-12, see `handoff_zoom_aws_setup.md`: iperf-server listeners up,
 `config/noise.json` in S3, VM5 has iperf3+boto3+repo.)
 
+### 1c. Confirm the iperf-server listeners are up — only for a with-noise run
+SSH the `iperf-server` directly from your laptop (`108.132.222.246`; it is **not** behind VM4, same key):
+```
+systemctl is-active iperf3@5201 iperf3@5202 iperf3@5203    # expect three "active"
+ss -lntu | grep 520                                        # three bound sockets
+```
+They are `enabled` systemd services, so a fresh instance start brings them up automatically — but the
+box must finish booting first (if VM5's first iperf burst times out, the server usually just wasn't up
+yet). If any line says `inactive`/`failed`:
+```
+sudo systemctl start iperf3@5201 iperf3@5202 iperf3@5203
+```
+Do **not** start `iperf3 -s` by hand — it collides with the systemd listener on the same port and fails
+to bind. (If you released the EIP to save cost while paused, the target IP changed — update
+`config/noise.json` in S3 to match.)
+
 ### 1a. Confirm clocks are synced (do this on every VM)
 Labels join the pcap (VM4 clock) to bot heartbeats (client clocks) by timestamp, so the clocks must
 agree.

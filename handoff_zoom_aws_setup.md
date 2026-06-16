@@ -17,7 +17,7 @@ For research scope, model rationale, evaluation methodology, and the topology di
 | VM1 | Zoom Bot Client A (host) | private1 (10.0.1.0/24) | 10.0.1.119 | via VM4 NAT |
 | VM2 | Zoom Bot Client B (joiner) | private2 (10.0.2.0/24) | 10.0.2.67 | via VM4 NAT |
 | VM3 | Zoom Bot Client C (joiner, 3-party only) | private3 (10.0.3.0/24) | 10.0.3.53 | via VM4 NAT |
-| VM5 | Noise generator (iperf) | private4 (10.0.4.0/24) | 10.0.4.16 | via VM4 NAT |
+| VM5 | Noise generator (iperf + curl downloads + ffmpeg HLS video) | private4 (10.0.4.0/24) | 10.0.4.16 | via VM4 NAT |
 
 All VMs: Ubuntu 24.04 LTS, t3.small, IAM role `zoom-bot-ec2-role` (S3 read/write on `zoom-bot-dataset-s3` only), key pair `zoom-capture-key`.
 
@@ -87,7 +87,7 @@ Because VM4 is a **single-ENI** NAT instance, `ens5` sees **two copies of every 
 
 ### S3
 - **Bucket:** `zoom-bot-dataset-s3` (eu-west-1)
-- **Folders:** `input_audio/` (contains `librispeech_audio.pcm`, a 1GB trimmed subset of LibriSpeech train-clean-100), `sessions/` (populated at runtime, one folder per call session), `config/noise.json` (single source of truth for VM5 noise — iperf endpoint/ports + ranges + seed; VM5 reads it to run, VM4 reads it to record into the spec/manifest. **Created 2026-06-12**: `target=108.132.222.246` + ports `5201,5202,5203` TCP/UDP, rate `1.0–50.0` Mbps; see `REFACTOR_DESIGN.md` decision 10)
+- **Folders:** `input_audio/` (contains `librispeech_audio.pcm`, a 1GB trimmed subset of LibriSpeech train-clean-100), `sessions/` (populated at runtime, one folder per call session), `config/noise.json` (single source of truth for VM5 noise; VM5 reads it to run, VM4 reads it to record into the spec/manifest. **Created 2026-06-12, REPLACED 2026-06-16** with the per-profile shape: three weighted profiles — `iperf` (target `108.132.222.246`, ports `5201,5202,5203` TCP/UDP), `download` (`curl` from curated public big-file URLs), `video` (`ffmpeg` HLS streams) — plus shared `seed`/`gap_s`; see `REFACTOR_DESIGN.md` decision 10. The old flat config will NOT parse under the new loader.)
 - **VPC Gateway Endpoint:** Configured so EC2 → S3 traffic stays on AWS internal network (free, no NAT bandwidth used)
 
 ### IAM
@@ -125,7 +125,7 @@ The client VMs cannot be SSH'd into directly from the internet — they have no 
 | VM1 | Docker CE + Compose plugin (official Docker apt repo, not snap/docker.io). User `ubuntu` is in `docker` group. Repo cloned to `~/zoom-meeting-orchestrator`; `zoom-agent` SDK image built (2026-06-09); ran the host bot. |
 | VM2 | Same as VM1; ran the joiner bot (2026-06-09). |
 | VM3 | Same as VM1; `zoom-agent` image built, agent run as a negative control 2026-06-09 (idle — not in the 2-party roster). Ready as 3-party joiner. |
-| VM5 | Noise node — runs the **standalone** `client/noise.py` (iperf *client*) independently of any session; not in the agent poll loop. **Provisioned natively 2026-06-12** (no Docker): `iperf3` + `python3-boto3` installed, repo cloned to `~/zoom-meeting-orchestrator`, S3 read via instance role confirmed, chrony locked to `169.254.169.123` (~4 µs offset). Additional ENIs not yet attached. The iperf *server* is the **separate `iperf-server` host outside the VPC** at EIP `108.132.222.246` (see below; not VM5). Sole iperf noise generator for now (more noise sources may be added later, incl. concurrent iperf on VM1/2/3). |
+| VM5 | Noise node — runs the **standalone** `client/noise.py` independently of any session; not in the agent poll loop. **Provisioned natively 2026-06-12** (no Docker): `iperf3` + `python3-boto3` installed, repo cloned to `~/zoom-meeting-orchestrator`, S3 read via instance role confirmed, chrony locked to `169.254.169.123` (~4 µs offset). **Realistic-noise update (2026-06-16, Checkpoint 1 built — pending on VM5):** `client/noise.py` now mixes iperf + `curl` web downloads + `ffmpeg` HLS video. Before the next noise run, **`sudo apt install -y ffmpeg` on VM5** (`curl` is part of the base image) and **`git pull`** the repo for the new `client/noise.py` + `common/noise_config.py`; the new per-profile `config/noise.json` must be pushed to S3 (the old flat config will not parse). Additional ENIs not yet attached. The iperf *server* is the **separate `iperf-server` host outside the VPC** at EIP `108.132.222.246` (see below; not VM5). Sole noise generator for now (more noise sources may be added later — incl. concurrent noise on VM1/2/3, or a second noise VM for overlapping traffic). |
 | **iperf-server** | **Noise-target host, OUTSIDE the capture VPC** (in the **default VPC**, eu-west-1, launched 2026-06-12). t3.micro, Ubuntu 24.04 LTS, key pair `zoom-capture-key`, **no IAM instance profile** (it never touches S3). **Elastic IP `108.132.222.246`** — stable across stop/start, and it is the `target` value in `config/noise.json`. SG `launch-wizard-1`: *inbound* SSH 22 from `0.0.0.0/0` + TCP & UDP 5201–5203 from VM4's EIP `34.242.98.206/32` (the post-NAT source of VM5's noise); *outbound* all traffic. `iperf3` installed; **3 persistent listeners running** (`iperf3@5201/5202/5203` systemd template, `enabled` so they survive reboot/stop-start) — DONE 2026-06-12. This host is the labeler's noise anchor (`src=10.0.4.16 & dst=108.132.222.246` → noise). |
 
 > The client container runs with `--network host` (needed so boto3 reaches the instance-role creds via
@@ -170,6 +170,16 @@ The official Docker repo install is intentional. Ubuntu's `docker.io` package la
   timeline `0→1→2→3→2→1→0`, flows `noise:24, zoom_media:39, zoom_signaling:107, other:35`; **all 24 noise
   flows exactly `10.0.4.16 ↔ 108.132.222.246`, rule `noise-vm-to-iperf-server`, zero leakage, no warnings.**
   Harness feature-complete for the `audio` profile.
+- **Realistic VM5 noise (Checkpoint 2), end-to-end (2026-06-16, `sess-20260616T151901Z-8249`):**
+  `ffmpeg` installed on VM5, the new per-profile `config/noise.json` pushed to S3, `client/noise.py` ran
+  the three-profile mix (iperf + curl + ffmpeg HLS) confirmed flowing pre-NAT as `10.0.4.16 → <iperf
+  server + web/video CDNs>`. 3-party call captured alongside. Labeler (laptop venv): `warnings:[]`, 226
+  flows (`zoom_signaling:107, zoom_media:39, noise:28, other:52`); **both noise rules fired —
+  `noise-from-noise-vm:26`** (curl/video to Fastly `199.232.26.132` / Cloudflare `162.159.140.220` /
+  Hetzner `80.249.99.148`) **+ `noise-vm-to-iperf-server:2`** (iperf to `108.132.222.246`); every noise
+  flow sourced only from `10.0.4.16`, **zero leakage both ways**, VM5 NTP correctly `other`/housekeeping;
+  timeline `0→1→2→3→2→1→0`, ~69 s three-party window. **Harness feature-complete AND live-validated for
+  the realistic-noise `audio` profile (see `handovers/handoff_zoom_refactor_phase14.md`).**
 
 ---
 
@@ -185,15 +195,18 @@ The official Docker repo install is intentional. Ubuntu's `docker.io` package la
      `~/zoom-meeting-orchestrator`; running `python3 -m client.noise` natively gives it the real
      `10.0.4.16` source IP and instance-role S3 access for free. Verified: `SessionStore().read_noise_config()`
      read `config/noise.json` from S3 (target `108.132.222.246`) using the instance role.
+     **Added 2026-06-16 for the realistic-noise profiles:** `curl` (already present) + **`ffmpeg`**
+     (`sudo apt install -y ffmpeg`) for the `download` / `video` noise profiles.
    - ~~Stand up the **dedicated internet iperf server** (a tiny host *outside* the VPC)~~ **DONE
      2026-06-12** — `iperf-server` t3.micro in the **default VPC**, Elastic IP **`108.132.222.246`**, key
      `zoom-capture-key`, no IAM role; SG `launch-wizard-1` opens TCP **and** UDP 5201–5203 from VM4's EIP
      `34.242.98.206/32` (+ SSH 22). `iperf3` installed; 3 persistent listeners running via systemd template
      `iperf3@5201/5202/5203` (`enabled`, one per port — `noise.py` runs one burst at a time, no concurrency).
-   - ~~Create **`config/noise.json`** in `s3://zoom-bot-dataset-s3/`~~ **DONE 2026-06-12** — uploaded with
-     `target=108.132.222.246`, `ports=[5201,5202,5203]`, `protocols=[tcp,udp]`, `rate_mbps=[1.0,50.0]`,
-     `burst_s=[2,10]`, `gap_s=[0.5,5.0]`, `reverse_prob=0.5`, `seed=4711`; validated on VM4 via
-     `SessionStore().read_noise_config().to_noise_block()` (loads clean, passes the rate-floor guard).
+   - ~~Create **`config/noise.json`** in `s3://zoom-bot-dataset-s3/`~~ **DONE 2026-06-12, REPLACED
+     2026-06-16** with the per-profile shape (iperf + download + video; see the S3 bucket note above).
+     The original 2026-06-12 flat config (`target=108.132.222.246`, `ports=[5201,5202,5203]`,
+     `protocols=[tcp,udp]`, `rate_mbps=[1.0,50.0]`, `burst_s=[2,10]`, `gap_s=[0.5,5.0]`,
+     `reverse_prob=0.5`, `seed=4711`) no longer parses under the new loader and was overwritten in S3.
 3. Attach additional ENIs to VM5 for multi-IP noise generation (noise should appear to come from multiple distinct source IPs to be realistic) — *deferred; the noise build targets a single source IP now, structured so this is a later flip.*
 4. ~~First end-to-end 2-party call: VM1 host, VM2 joiner, tshark on VM4, manifest to S3~~ **DONE 2026-06-09** (`sess-20260609T150600Z-9bda`; see Verified Behaviour).
 5. ~~Scale to 3-party~~ **DONE 2026-06-10** (`sess-20260610T105421Z-0d1f`). ~~add VM5 noise~~ **DONE
