@@ -104,9 +104,9 @@ Because VM4 is a **single-ENI** NAT instance, `ens5` sees **two copies of every 
 Local laptop ──(EIP)──> VM4 ──(private subnets via VPC)──> VM1, VM2, VM3, VM5
 ```
 
-VM4 acts as bastion. The key (`zoom-capture-key.pem`, chmod 400) lives at `~/.ssh/zoom-capture-key.pem` on VM4. `~/.ssh/config` on VM4 has aliases `vm1`, `vm2`, `vm3`, `vm5` mapping to the private IPs above, so `ssh vm1` from VM4 just works.
+VM4 acts as bastion. The key (`zoom-capture-key.pem`, chmod 400) lives at `~/.ssh/zoom-capture-key.pem` on VM4. `~/.ssh/config` on VM4 has aliases `vm1`, `vm2`, `vm3` mapping to the private IPs above, so `ssh vm1` from VM4 just works. **`vm5` may NOT be aliased** — in the 2026-06-12 noise run `ssh vm5` did not resolve to VM5; reach it directly with **`ssh 10.0.4.16`** from VM4 (or add the alias). ⚠️ The hosts look alike — confirm the prompt (`ip-10-0-4-16` = VM5) before running `client/noise.py`; it failed this session from being launched on the wrong box (the iperf-server has no IAM role; VM3 has no iperf3).
 
-The client VMs cannot be SSH'd into directly from the internet — they have no public IPs and are in private subnets. Always go through VM4.
+The client VMs cannot be SSH'd into directly from the internet — they have no public IPs and are in private subnets. Always go through VM4. **Exception:** the separate `iperf-server` (default VPC, EIP `108.132.222.246`) is **not** behind VM4 — SSH it directly from the laptop with the same `zoom-capture-key`.
 
 ---
 

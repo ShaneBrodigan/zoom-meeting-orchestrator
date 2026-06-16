@@ -17,11 +17,16 @@ Follow it top to bottom. First verified end to end on 2026-06-09 (the 2-party ca
 | VM1 | `10.0.1.119` | Zoom **host** bot                              | Yes (SDK image) |
 | VM2 | `10.0.2.67`  | Zoom **joiner** bot                            | Yes (SDK image) |
 | VM3 | `10.0.3.53`  | Zoom **joiner** bot (3-party runs)             | Yes (SDK image) |
-| VM5 | `10.0.4.16`  | iperf noise (later phase)                      | Yes (later)     |
+| VM5 | `10.0.4.16`  | iperf noise generator (`client/noise.py`)      | **No** — native |
 
-**Two scripts drive a run** (both already on the VMs, in `~/zoom-meeting-orchestrator`):
+Plus, for a noise run, a separate **`iperf-server`** host outside the VPC (default VPC, EIP
+`108.132.222.246`) that VM5's noise targets — it just runs 3 `iperf3 -s` listeners.
+
+**Three scripts drive a run** (all already on the VMs, in `~/zoom-meeting-orchestrator`):
 - `live_check_orchestrator.py` — run on **VM4**. Its `roster=[…]` decides who's in the call.
 - `live_check_agent.py` — run on **each client VM**, inside the SDK container.
+- `client/noise.py` — run on **VM5 natively** (`python3 -m client.noise`) for a *with-noise* run;
+  it loops iperf bursts forever, independent of any session (decision 10). Skip it for no-noise.
 
 **Golden rule of ordering:** start the **client agents first** (they begin polling), **then** start the
 orchestrator on VM4. The agents ignore any session that already existed when they started, so if VM4
@@ -34,9 +39,27 @@ publishes the spec before an agent is up, that agent will miss the call.
 In the AWS console, start the VMs you need:
 - **2-party run:** VM4, VM1, VM2
 - **3-party run:** VM4, VM1, VM2, VM3
+- **with VM5 noise:** also start **VM5** and the separate **`iperf-server`** (EIP `108.132.222.246`)
 
 Give them ~30s to boot. SSH in from your laptop via VM4 (the bastion); from VM4 you can reach the
-clients with the configured aliases `ssh vm1` / `ssh vm2` / `ssh vm3`.
+clients with the configured aliases `ssh vm1` / `ssh vm2` / `ssh vm3`. **VM5 has no alias** — reach it
+with `ssh 10.0.4.16` from VM4. The `iperf-server` is *not* behind VM4 — SSH it directly from the laptop
+(same key). ⚠️ Check the prompt before running anything: `client/noise.py` belongs **only** on VM5
+(`ip-10-0-4-16`).
+
+### 1b. Start the noise generator (VM5) — only for a with-noise run
+On **VM5** (`ssh 10.0.4.16` from VM4, then `cd ~/zoom-meeting-orchestrator`):
+```
+python3 -m client.noise
+```
+It reads `config/noise.json` from S3 (instance role) and loops seeded iperf bursts at the `iperf-server`
+forever — leave it running for the whole capture (it deliberately blankets pre-roll/gaps/post-roll).
+You'll see periodic iperf transfer reports. Optional sanity check on VM4 that noise is flowing pre-NAT:
+```
+sudo tcpdump -i ens5 -n host 10.0.4.16 and not tcp port 22 -c 5    # expect 10.0.4.16 > 108.132.222.246
+```
+(Prereqs — all done 2026-06-12, see `handoff_zoom_aws_setup.md`: iperf-server listeners up,
+`config/noise.json` in S3, VM5 has iperf3+boto3+repo.)
 
 ### 1a. Confirm clocks are synced (do this on every VM)
 Labels join the pcap (VM4 clock) to bot heartbeats (client clocks) by timestamp, so the clocks must
@@ -71,6 +94,17 @@ the VMs you started:
         ],
 ```
 Exactly one `ROLE_HOST`. `participant_count` is derived automatically.
+
+**For a with-noise run**, also add the VM5 entry (and `from common.s3 import SessionStore` to the imports);
+this *records* the noise block from `config/noise.json` into the manifest — it does **not** start noise
+(that runs independently on VM5, step 1b):
+```python
+        noise = SessionStore().read_noise_config().to_noise_block()
+        ...
+            RosterEntry(ip="10.0.4.16", zoom_role=ROLE_NONE, noise=noise),  # VM5 noise
+```
+This is currently **committed** in `live_check_orchestrator.py`. ⚠️ **For a no-noise run, remove that
+line** — otherwise the manifest claims noise the pcap won't contain.
 
 > A VM whose IP is **not** in the roster will still poll but stay idle (it never joins) — useful as a
 > negative control, harmless otherwise.
@@ -165,6 +199,15 @@ Healthy result: tens of thousands of packets; each rostered client IP (`10.0.1.1
 `10.0.3.53`) present as a source (the bots' outbound audio), plus Zoom relay IPs as sources (the
 downlink). No `10.0.0.7` and no SSH — that confirms the clean pre-NAT capture.
 
+**For a with-noise run**, also expect `10.0.4.16` (noise uplink) and `108.132.222.246` (noise
+downlink/reverse) as high-volume sources — iperf will dominate the packet count. Then run the labeler
+(see the bottom tip) and confirm the separation held:
+```
+python3 -c "import json; d=json.load(open('sessions/<session_id>/labels.json')); f=d['flows']; n=[x for x in f if x['label']=='noise']; print('warnings:', d['warnings']); print('noise:', len(n), sorted({x['rule'] for x in n}), sorted({(x['ip_a'],x['ip_b']) for x in n})); print('zoom touching noise ep:', sum(1 for x in f if x['label'].startswith('zoom') and ({'10.0.4.16','108.132.222.246'} & {x['ip_a'],x['ip_b']})))"
+```
+Pass: `warnings: []`, rule `['noise-vm-to-iperf-server']`, noise endpoints only
+`('10.0.4.16','108.132.222.246')`, and `zoom touching noise ep: 0`.
+
 ---
 
 ## 6. Clean up
@@ -177,7 +220,12 @@ pgrep -a tshark; pgrep -a dumpcap        # should print nothing
 ```
 **On each client VM** — `Ctrl-C` the agent, then `exit` the container (the `--rm` flag deletes it).
 
-**Finally** — stop all VMs in the AWS console (running ≈ \$93/month; stopped ≈ \$9/month).
+**On VM5 (noise runs)** — `Ctrl-C` the `client/noise.py` loop.
+
+**Finally** — stop all VMs in the AWS console (running ≈ \$93/month; stopped ≈ \$9/month). For a noise
+run, also stop **VM5** and the **`iperf-server`**. Note the `iperf-server`'s EIP bills even while stopped
+(~\$3.60/mo) — release it if pausing noise work for a while (a new IP would need `config/noise.json` +
+`handoff_zoom_aws_setup.md` updated).
 
 > Leaving the client agents running is fine if you want to fire several orchestrator runs back-to-back —
 > they keep polling and will pick up each new session automatically.

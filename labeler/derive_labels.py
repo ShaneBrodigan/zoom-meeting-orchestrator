@@ -12,11 +12,19 @@ derives the labels from those facts plus the packet capture:
   ``noise`` / ``zoom_media`` / ``zoom_signaling`` / ``other``, with the rule that
   fired recorded so a surprising label is auditable.
 
-Noise is tagged by the (source VM, iperf server) address pair recorded in the
-manifest roster's noise blocks — the one property that survives the per-burst
-port/rate/protocol randomization (decision 10). Because the match is per roster
-entry (and covers any extra ``source_ips``), the same rule keeps working when
-noise later runs concurrently on a VoIP VM or from extra ENIs.
+Noise is tagged by **two complementary rules** (decision 10 + the realistic-noise
+convergence), because a noise VM now mixes iperf with web downloads and video that
+hit *arbitrary* internet hosts — there is no single destination to anchor on:
+
+* ``noise-vm-to-iperf-server`` — the recorded (source, iperf-server) address pair.
+  This is the *only* rule that can separate noise from the call on a VoIP VM that
+  runs noise concurrently (a future flip), since there the source IP also carries
+  Zoom. It also covers extra ``source_ips`` (multi-ENI).
+* ``noise-from-noise-vm`` — any flow whose source is a ``zoom_role:none`` VM with
+  noise enabled. Such a VM never joins Zoom, so *everything* it sends is noise,
+  whatever the destination — this is what catches curl/ffmpeg traffic to arbitrary
+  web hosts. It is gated on ``zoom_role:none`` precisely so it can never swallow a
+  VoIP VM's real call traffic.
 
 **Hygiene boundary (decision 6/10):** raw IPs appear throughout this output ON
 PURPOSE. Labels are the researcher's offline answer key and may use oracle knowledge
@@ -236,18 +244,28 @@ def _label_flows(
     warnings: list[str] = []
     roster_ips = {e.ip for e in manifest.roster}
     voip_ips = {e.ip for e in manifest.roster if e.zoom_role != ROLE_NONE}
+    # Two noise anchors (see module docstring): the (source, iperf-server) pairs, and
+    # the pure-noise VMs whose every flow is noise regardless of destination.
     noise_pairs: set[frozenset] = set()
+    noise_source_ips: set[str] = set()
     for e in manifest.roster:
         if not e.noise.enabled:
             continue
-        if not e.noise.target:
-            # Without the recorded anchor its iperf flows would silently land in
-            # other labels — the "mislabel noise invisibly" trap of decision 10.
-            warnings.append(f"{e.ip}: noise enabled but no target recorded; "
-                            "its flows cannot be tagged noise")
-            continue
-        for source_ip in {e.ip, *e.noise.source_ips}:  # extra ENIs included
-            noise_pairs.add(frozenset((source_ip, e.noise.target)))
+        source_ips = {e.ip, *e.noise.source_ips}  # extra ENIs included
+        if e.zoom_role == ROLE_NONE:
+            # A pure-noise VM never joins Zoom, so all its egress is noise — no
+            # destination anchor needed (this is what catches curl/video to arbitrary
+            # hosts).
+            noise_source_ips |= source_ips
+        if e.noise.target:
+            for source_ip in source_ips:
+                noise_pairs.add(frozenset((source_ip, e.noise.target)))
+        elif e.zoom_role != ROLE_NONE:
+            # A VoIP VM's noise can only be separated from its call traffic by the
+            # destination anchor; without it those flows are unlabelable, which must be
+            # loud, not an invisibly mislabeled dataset (decision 10).
+            warnings.append(f"{e.ip}: noise enabled on a VoIP VM but no target recorded; "
+                            "its noise flows cannot be separated from the call")
 
     # Group both directions of a conversation under one canonical key.
     stats: dict[tuple, _FlowStats] = defaultdict(_FlowStats)
@@ -266,7 +284,8 @@ def _label_flows(
     for (proto, (ip_a, port_a), (ip_b, port_b)), s in stats.items():
         label, rule = _classify_flow(
             proto, ip_a, port_a, ip_b, port_b,
-            noise_pairs=noise_pairs, voip_ips=voip_ips, roster_ips=roster_ips,
+            noise_pairs=noise_pairs, noise_source_ips=noise_source_ips,
+            voip_ips=voip_ips, roster_ips=roster_ips,
         )
         flows.append(FlowLabel(
             proto=proto, ip_a=ip_a, port_a=port_a, ip_b=ip_b, port_b=port_b,
@@ -296,19 +315,25 @@ def _classify_flow(
     ip_b: str, port_b: int | None,
     *,
     noise_pairs: set[frozenset],
+    noise_source_ips: set[str],
     voip_ips: set[str],
     roster_ips: set[str],
 ) -> tuple[str, str]:
     """First matching rule wins; the rule name is recorded alongside the label.
 
-    Noise is checked first so that, even when noise later runs concurrently on a
-    VoIP VM (or a burst happens to land on a Zoom-looking port), the recorded
-    (source, iperf server) pair still claims the flow."""
+    The (source, iperf-server) pair is checked first so that, even when noise runs
+    concurrently on a VoIP VM (or a burst lands on a Zoom-looking port), the recorded
+    anchor still claims the flow. The pure-noise-VM source rule is checked after the
+    housekeeping carve-out, so a noise VM's own DNS/NTP stays consistently labeled
+    ``other`` like every other VM's (in practice such housekeeping never reaches the
+    capture, but the ordering keeps the answer key consistent if it ever did)."""
     ports = {port_a, port_b}
     if frozenset((ip_a, ip_b)) in noise_pairs:
         return LABEL_NOISE, "noise-vm-to-iperf-server"
     if ports & _HOUSEKEEPING_PORTS:
         return LABEL_OTHER, "housekeeping-port"
+    if ip_a in noise_source_ips or ip_b in noise_source_ips:
+        return LABEL_NOISE, "noise-from-noise-vm"
     involves_voip = ip_a in voip_ips or ip_b in voip_ips
     if proto == "tcp" and 443 in ports and involves_voip:
         return LABEL_ZOOM_SIGNALING, "voip-client-tls-443"

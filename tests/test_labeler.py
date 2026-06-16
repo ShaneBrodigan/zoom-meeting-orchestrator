@@ -213,6 +213,15 @@ def test_noise_rule_beats_zoom_rules_for_concurrent_noise_on_voip_vm():
     assert labels.flows[0].label == LABEL_NOISE
 
 
+def test_voip_vm_with_noise_keeps_its_zoom_flow_labeled_zoom():
+    """The source rule is gated on zoom_role:none, so a VoIP VM that also runs noise
+    (future flip) must keep its real Zoom media labeled zoom_media — only its flow to
+    the iperf anchor is noise."""
+    m = make_manifest(noise_on_host=True)
+    labels = derive_labels(m, [udp(HOST, ZOOM_RELAY, 50000, 8801)])
+    assert labels.flows[0].label == LABEL_ZOOM_MEDIA
+
+
 def test_noise_from_extra_eni_source_ip_still_tagged():
     """Future flag-flip: multi-ENI noise. Bursts leaving from a recorded extra
     source IP must still match the noise rule."""
@@ -225,12 +234,23 @@ def test_noise_from_extra_eni_source_ip_still_tagged():
     assert labels.flows[0].label == LABEL_NOISE
 
 
-def test_noise_enabled_without_target_warns_instead_of_silent_mislabel():
-    """A noise block missing its anchor cannot tag flows — that must be loud,
-    not an invisibly mislabeled dataset (decision 10)."""
-    m = make_manifest(noise_block=NoiseBlock(enabled=True, profile="iperf", target=None))
+def test_noise_vm_without_anchor_still_tagged_by_source():
+    """A pure-noise VM needs no iperf anchor: every flow it sources is noise, so a
+    missing target is fine and silent — the source rule covers it."""
+    m = make_manifest(noise_block=NoiseBlock(enabled=True, profile="download", target=None))
     labels = derive_labels(m, [udp(NOISE_VM, IPERF_SERVER, 49152, 5201)])
-    assert labels.flows[0].label == LABEL_OTHER  # fell through, but...
+    assert labels.flows[0].label == LABEL_NOISE
+    assert labels.flows[0].rule == "noise-from-noise-vm"
+    assert labels.warnings == []
+
+
+def test_voip_vm_noise_without_anchor_warns_instead_of_silent_mislabel():
+    """On a VoIP VM the source rule can't fire (its IP also carries Zoom), so a noise
+    block missing its anchor cannot be separated from the call — that must be loud,
+    not an invisibly mislabeled dataset (decision 10)."""
+    m = make_manifest(noise_on_host=True,
+                      noise_block=NoiseBlock(enabled=True, profile="iperf", target=None))
+    labels = derive_labels(m, [udp(HOST, IPERF_SERVER, 50000, 8801)])
     assert any("no target recorded" in w for w in labels.warnings)
 
 
@@ -256,12 +276,13 @@ def test_dns_and_ntp_labeled_other_housekeeping():
                for f in labels.flows)
 
 
-def test_noise_vm_traffic_to_other_destinations_is_not_zoom():
-    """VM5 has no Zoom role: its non-iperf traffic must fall through to other."""
+def test_noise_vm_traffic_to_arbitrary_hosts_is_noise():
+    """VM5 has no Zoom role, so everything it sends is noise — including web
+    downloads / video to arbitrary hosts, not just iperf to the anchor server."""
     labels = derive_labels(make_manifest(), [udp(NOISE_VM, "8.8.8.8", 40000, 9999)])
     f = labels.flows[0]
-    assert f.label == LABEL_OTHER
-    assert f.rule == "unmatched"
+    assert f.label == LABEL_NOISE
+    assert f.rule == "noise-from-noise-vm"
 
 
 def test_portless_packets_are_grouped_and_fall_through():
