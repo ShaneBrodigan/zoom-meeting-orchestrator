@@ -108,3 +108,13 @@ def test_manifest_round_trips_after_build():
     m = build_manifest(make_spec(), [], capture())
     from common.schema import Manifest
     assert Manifest.from_json(m.to_json()) == m
+
+
+def test_timing_plan_records_bucket_and_run_seed_when_supplied():
+    m = build_manifest(make_spec(), [], capture(), duration_bucket_min=20, run_seed=4711)
+    assert m.timing_plan == {"duration_bucket_min": 20, "run_seed": 4711}
+
+
+def test_timing_plan_empty_without_bulk_fields():
+    m = build_manifest(make_spec(), [], capture())
+    assert m.timing_plan == {}

@@ -341,9 +341,13 @@ class Manifest:
     Contains no derived labels; the offline labeler computes those from this file
     plus the pcap.
 
-    ``audio`` and ``noise`` are kept as free-form fact bags for now: their exact
-    contents are not yet frozen, and forcing a shape here would be flexibility we
-    don't need until those facts settle."""
+    ``audio``, ``noise`` and ``timing_plan`` are kept as free-form fact bags for now:
+    their exact contents are not yet frozen, and forcing a shape here would be
+    flexibility we don't need until those facts settle. ``timing_plan`` records how the
+    call length was chosen for a bulk-generated session — the intended duration bucket
+    (e.g. ``duration_bucket_min: 20``) and the master ``run_seed`` — so the dataset is
+    self-describing and the duration-bucket balance is auditable from S3 alone. It is
+    empty for one-off (non-bulk) sessions."""
     session_id: str
     meeting_id: str
     roster: list[RosterEntry]
@@ -352,6 +356,7 @@ class Manifest:
     seeds: Seeds
     audio: dict[str, Any] = field(default_factory=dict)
     noise: dict[str, Any] = field(default_factory=dict)
+    timing_plan: dict[str, Any] = field(default_factory=dict)
     schema_version: int = SCHEMA_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -364,6 +369,7 @@ class Manifest:
             "capture": self.capture.to_dict(),
             "audio": dict(self.audio),
             "noise": dict(self.noise),
+            "timing_plan": dict(self.timing_plan),
             "seeds": self.seeds.to_dict(),
         }
 
@@ -378,6 +384,7 @@ class Manifest:
             seeds=Seeds.from_dict(d["seeds"]),
             audio=dict(d.get("audio", {})),
             noise=dict(d.get("noise", {})),
+            timing_plan=dict(d.get("timing_plan", {})),
             schema_version=d.get("schema_version", SCHEMA_VERSION),
         )
 

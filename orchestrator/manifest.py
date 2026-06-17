@@ -36,6 +36,8 @@ def build_manifest(
     capture: Capture,
     *,
     audio_source: str | None = None,
+    duration_bucket_min: int | None = None,
+    run_seed: int | None = None,
 ) -> Manifest:
     """Combine the spec, the reported heartbeats, and the capture facts.
 
@@ -44,12 +46,23 @@ def build_manifest(
     recorded, or ``None`` if the client never reported that event — a missing join is
     itself a fact worth keeping. ``audio_source`` (the shared source file used) is
     recorded when supplied.
+
+    ``duration_bucket_min`` and ``run_seed`` come from the bulk generator: the intended
+    duration bucket and the master seed of the batch. They are recorded in
+    ``timing_plan`` so the duration-bucket balance is auditable from the manifests alone.
+    Both are absent (and ``timing_plan`` is empty) for one-off sessions.
     """
     joins_leaves = _derive_joins_leaves(spec, heartbeats)
 
     audio: dict[str, Any] = {"seed": spec.seeds.turns}
     if audio_source is not None:
         audio["source"] = audio_source
+
+    timing_plan: dict[str, Any] = {}
+    if duration_bucket_min is not None:
+        timing_plan["duration_bucket_min"] = duration_bucket_min
+    if run_seed is not None:
+        timing_plan["run_seed"] = run_seed
 
     return Manifest(
         session_id=spec.session_id,
@@ -59,6 +72,7 @@ def build_manifest(
         capture=capture,
         audio=audio,
         noise=_summarize_noise(spec),
+        timing_plan=timing_plan,
         seeds=spec.seeds,
     )
 

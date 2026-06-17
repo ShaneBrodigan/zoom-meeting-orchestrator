@@ -92,6 +92,13 @@ class SessionConfig:
     turns, and a participant slot; ``none`` entries (e.g. VM5) only carry a noise
     record. ``seeds`` make the timing and turn schedule reproducible from the
     manifest forever.
+
+    ``duration_range_s``/``duration_bucket_min``/``run_seed`` are set by the bulk
+    generator (orchestrator/generation_plan.py) to shape the call length: the range is
+    a chosen duration bucket ± jitter, handed to ``generate_timing``; the bucket and the
+    batch's master seed are recorded into the manifest's ``timing_plan``. All three are
+    ``None`` for a one-off session, which then behaves exactly as before (default
+    duration range, empty ``timing_plan``).
     """
     roster: list[RosterEntry]
     seeds: Seeds
@@ -100,6 +107,9 @@ class SessionConfig:
     topic: str = "Bot Meeting"
     pcap_dir: str = DEFAULT_PCAP_DIR
     audio_source: str = AUDIO_SOURCE_KEY
+    duration_range_s: tuple[float, float] | None = None
+    duration_bucket_min: int | None = None
+    run_seed: int | None = None
 
 
 class SessionOrchestrator:
@@ -135,7 +145,8 @@ class SessionOrchestrator:
             raise ValueError("roster has no joining client (every entry is zoom_role 'none')")
 
         meeting = self._scheduler.create_meeting(topic=config.topic)
-        timing = generate_timing(config.seeds.timing, joining_ips)
+        timing = generate_timing(config.seeds.timing, joining_ips,
+                                 duration_range_s=config.duration_range_s)
         turns = generate_turns(config.seeds.turns, joining_ips, timing.duration_s)
         spec = Spec(
             session_id=config.session_id,
@@ -177,6 +188,8 @@ class SessionOrchestrator:
             heartbeats,
             Capture(t_start=t_start, t_stop=t_stop, pcap_key=pcap_key),
             audio_source=config.audio_source,
+            duration_bucket_min=config.duration_bucket_min,
+            run_seed=config.run_seed,
         )
         self._store.write_manifest(manifest)
         return manifest

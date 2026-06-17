@@ -177,6 +177,43 @@ def test_preroll_slept_between_start_and_publish_and_postroll_before_stop():
     assert duration > preroll and duration > postroll  # join offsets << duration
 
 
+# --- bulk-generation pass-through: duration range + recorded bucket -------- #
+
+def test_duration_range_is_honoured():
+    # A per-session duration range (bucket ± jitter) collapses to a fixed length when
+    # lo == hi; the seeded uniform draw must land exactly there, and the call body sleep
+    # must use it.
+    orch, _, store, _, _, sleeps = make_orchestrator()
+    cfg = two_party_config(session_id="sess-dur")
+    cfg.duration_range_s = (900.0, 900.0)  # exactly 15 minutes
+    orch.run_session(cfg)
+    spec = store.read_spec("sess-dur")
+    assert spec.timing.duration_s == 900.0
+    # sleeps are preroll, duration, postroll — the middle one is the call body.
+    assert sleeps[1] == 900.0
+
+
+def test_bucket_and_run_seed_recorded_in_timing_plan():
+    orch, _, store, _, _, _ = make_orchestrator()
+    cfg = two_party_config(session_id="sess-bucket")
+    cfg.duration_range_s = (810.0, 990.0)
+    cfg.duration_bucket_min = 15
+    cfg.run_seed = 4711
+    orch.run_session(cfg)
+    manifest = store.read_manifest_for_test("sess-bucket")
+    assert manifest.timing_plan == {"duration_bucket_min": 15, "run_seed": 4711}
+
+
+def test_timing_plan_empty_for_one_off_session():
+    # No bulk fields set -> empty timing_plan, default duration range (60-180s) as before.
+    orch, _, store, _, _, _ = make_orchestrator()
+    orch.run_session(two_party_config(session_id="sess-oneoff"))
+    manifest = store.read_manifest_for_test("sess-oneoff")
+    assert manifest.timing_plan == {}
+    spec = store.read_spec("sess-oneoff")
+    assert 60.0 <= spec.timing.duration_s <= 180.0
+
+
 # --- the first checkpoint shape: no bots yet ------------------------------- #
 
 def test_plumbing_run_has_empty_joins_when_no_heartbeats():

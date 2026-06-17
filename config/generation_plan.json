@@ -1,0 +1,12 @@
+{
+  "duration": {
+    "buckets_min": [5, 15, 20, 30],
+    "weights": [0.25, 0.25, 0.25, 0.25],
+    "jitter_pct": 0.10,
+    "min_duration_s": 30
+  },
+  "party_size": {
+    "sizes": [2, 3],
+    "weights": [0.5, 0.5]
+  }
+}

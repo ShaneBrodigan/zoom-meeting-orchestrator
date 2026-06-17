@@ -32,6 +32,7 @@ import os
 
 from dotenv import load_dotenv
 
+from common.infra import VM1_IP, VM2_IP, VM3_IP, VM5_NOISE_IP
 from common.s3 import SessionStore
 from common.schema import ROLE_HOST, ROLE_JOINER, ROLE_NONE, RosterEntry, Seeds
 from orchestrator.session_orchestrator import SessionConfig, SessionOrchestrator
@@ -49,10 +50,10 @@ def main() -> None:
     noise = SessionStore().read_noise_config().to_noise_block()
     config = SessionConfig(
         roster=[
-            RosterEntry(ip="10.0.1.119", zoom_role=ROLE_HOST),    # VM1
-            RosterEntry(ip="10.0.2.67", zoom_role=ROLE_JOINER),   # VM2
-            RosterEntry(ip="10.0.3.53", zoom_role=ROLE_JOINER),   # VM3
-            RosterEntry(ip="10.0.4.16", zoom_role=ROLE_NONE, noise=noise),  # VM5 noise
+            RosterEntry(ip=VM1_IP, zoom_role=ROLE_HOST),    # VM1
+            RosterEntry(ip=VM2_IP, zoom_role=ROLE_JOINER),  # VM2
+            RosterEntry(ip=VM3_IP, zoom_role=ROLE_JOINER),  # VM3
+            RosterEntry(ip=VM5_NOISE_IP, zoom_role=ROLE_NONE, noise=noise),  # VM5 noise
         ],
         seeds=Seeds(turns=4711, timing=9001),
     )

@@ -39,7 +39,7 @@ def generate_timing(
     client_ips: list[str],
     *,
     preroll_range_s: tuple[float, float] = DEFAULT_PREROLL_RANGE_S,
-    duration_range_s: tuple[float, float] = DEFAULT_DURATION_RANGE_S,
+    duration_range_s: tuple[float, float] | None = None,
     postroll_range_s: tuple[float, float] = DEFAULT_POSTROLL_RANGE_S,
     join_window_fraction: float = DEFAULT_JOIN_WINDOW_FRACTION,
     max_join_delay_s: float = DEFAULT_MAX_JOIN_DELAY_S,
@@ -50,7 +50,13 @@ def generate_timing(
     VMs). Each gets its own join offset, in seconds from the moment capture starts.
     The draw order is fixed (preroll, duration, postroll, then join delays in
     ``client_ips`` order), so the result is reproducible for a given seed and input.
+
+    ``duration_range_s`` defaults to ``DEFAULT_DURATION_RANGE_S``; the bulk generator
+    passes a per-session range (a duration bucket ± jitter) so it can shape the call
+    length while the seeded ``uniform`` draw below stays the single source of randomness.
     """
+    if duration_range_s is None:
+        duration_range_s = DEFAULT_DURATION_RANGE_S
     if not client_ips:
         raise ValueError("need at least one joining client to build timing")
     for name, rng_bounds in (
