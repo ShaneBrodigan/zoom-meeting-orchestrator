@@ -139,11 +139,16 @@ class Bot:
         self.audio_helper = None
         self.audio_raw_data_sender = None
         self.virtual_audio_mic_event_passthrough = None
+        self.audio_source = None
+        self.recording_ctrl = None
+        self.recording_event = None
         self.participants_ctrl = None
         self.my_participant_id = None
 
         self._pcm_file = None
         self._joined_reported = False
+        self._mic_started = False
+        self._last_turn_log_bucket = -1
 
     # --- lifecycle --------------------------------------------------------- #
 
@@ -246,21 +251,89 @@ class Bot:
         self.audio_ctrl.JoinVoip()
         self.audio_ctrl.UnMuteAudio(self.my_participant_id)
 
+        # The raw-audio pipeline must be started before the SDK will pull from our
+        # external mic source. The working demo calls StartRawRecording() (and
+        # subscribe(), see _start_mic) before setExternalAudioSource; dropping them in
+        # the refactor is why the bot joined but stayed silent. StartRawRecording needs
+        # local-recording privilege — the host has it inherently, a joiner may have to
+        # request it from the host — so we attempt it now and retry from the
+        # privilege-changed callback rather than assuming it succeeds.
+        self.recording_ctrl = self.meeting_service.GetMeetingRecordingController()
+        self.recording_event = zoom.MeetingRecordingCtrlEventCallbacks(
+            onRecordPrivilegeChangedCallback=self._on_record_privilege_changed,
+        )
+        self.recording_ctrl.SetEvent(self.recording_event)
+        self._schedule(1, self._start_raw_recording)
+
+    def _start_raw_recording(self) -> None:
+        """Start the raw-audio pipeline, then bring up the mic. Mirrors the demo:
+        if this bot lacks local-recording privilege, request it and bail — the grant
+        arrives via :meth:`_on_record_privilege_changed`, which retries."""
+        import zoom_meeting_sdk as zoom
+
+        if self._mic_started:
+            return
+        if self.recording_ctrl.CanStartRawRecording() != zoom.SDKERR_SUCCESS:
+            print(f"[bot {self._config.my_ip}] no raw-recording privilege yet; requesting")
+            self.recording_ctrl.RequestLocalRecordingPrivilege()
+            return  # wait for the privilege-changed callback to retry
+        if self.recording_ctrl.StartRawRecording() != zoom.SDKERR_SUCCESS:
+            print(f"[bot {self._config.my_ip}] StartRawRecording failed")
+            return
+        print(f"[bot {self._config.my_ip}] raw recording started; bringing up mic")
         self._start_mic()
+
+    def _on_record_privilege_changed(self, can_record) -> None:
+        print(f"[bot {self._config.my_ip}] record privilege changed: can_record={can_record}")
+        if can_record:
+            self._schedule(1, self._start_raw_recording)
+
+    def _schedule(self, delay_s: int, fn: "Callable[[], None]") -> None:
+        """Run ``fn`` once after ``delay_s`` on the GLib loop (the SDK's thread)."""
+        import gi
+
+        gi.require_version("GLib", "2.0")
+        from gi.repository import GLib
+
+        def once():
+            fn()
+            return False  # one-shot
+
+        GLib.timeout_add_seconds(delay_s, once)
 
     def _start_mic(self) -> None:
         import zoom_meeting_sdk as zoom
 
+        self._mic_started = True
         self.audio_helper = zoom.GetAudioRawdataHelper()
         if self.audio_helper is None:
             raise RuntimeError("GetAudioRawdataHelper returned None")
+
+        # Subscribe to incoming raw audio with a discard callback. The working demo
+        # subscribes before registering the mic, and the mic-start-send callback does
+        # not fire reliably without it. The downlink audio already arrives over the
+        # JoinVoip media channel, so decoding-and-dropping it here adds no extra network
+        # flow and writes nothing to disk — the capture stays audio-only-clean
+        # (decision 8).
+        self.audio_source = zoom.ZoomSDKAudioRawDataDelegateCallbacks(
+            onOneWayAudioRawDataReceivedCallback=self._on_audio_received,
+            collectPerformanceData=False,
+        )
+        self.audio_helper.subscribe(self.audio_source, False)
+
         self.virtual_audio_mic_event_passthrough = zoom.ZoomSDKVirtualAudioMicEventCallbacks(
             onMicInitializeCallback=self._on_mic_initialize,
             onMicStartSendCallback=self._on_mic_start_send,
         )
         self.audio_helper.setExternalAudioSource(self.virtual_audio_mic_event_passthrough)
 
+    def _on_audio_received(self, data, node_id) -> None:
+        """Discard incoming audio. We must subscribe for the send pipeline to start,
+        but an audio-only capture keeps no recordings — so this deliberately drops it."""
+        return
+
     def _on_mic_initialize(self, sender) -> None:
+        print(f"[bot {self._config.my_ip}] mic initialize")
         self.audio_raw_data_sender = sender
 
     def _on_mic_start_send(self) -> None:
@@ -270,19 +343,31 @@ class Bot:
         from gi.repository import GLib
         import zoom_meeting_sdk as zoom
 
+        print(f"[bot {self._config.my_ip}] mic start send")
         self._open_audio()
 
         def send_chunk():
             t = self._clock() - self._config.anchor_epoch
-            if is_my_turn(self._config.turns, self._config.my_ip, t):
+            mine = is_my_turn(self._config.turns, self._config.my_ip, t)
+            if mine:
                 chunk = self._next_audio_chunk()
             else:
                 chunk = _SILENCE_CHUNK  # listening: send silence (DTX tuning is a knob)
             self.audio_raw_data_sender.send(chunk, _AUDIO_SAMPLE_RATE,
                                             zoom.ZoomSDKAudioChannel_Mono)
+            self._log_turn(t, mine)
             return True
 
         GLib.timeout_add(1000, send_chunk)
+
+    def _log_turn(self, session_time_s: float, speaking: bool) -> None:
+        """Print the speaking/listening state at most once per ~10 s so a run can be
+        confirmed (alternating speakers) from the logs, not just by ear."""
+        bucket = int(session_time_s // 10)
+        if bucket != self._last_turn_log_bucket:
+            self._last_turn_log_bucket = bucket
+            state = "SPEAKING" if speaking else "silent"
+            print(f"[bot {self._config.my_ip}] t={session_time_s:6.1f}s {state}")
 
     # --- audio source ------------------------------------------------------ #
 
