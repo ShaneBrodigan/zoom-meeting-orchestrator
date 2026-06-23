@@ -56,7 +56,11 @@ _SILENCE_CHUNK = b"\x00" * _AUDIO_CHUNK_BYTES
 # --------------------------------------------------------------------------- #
 
 def speaker_at(turns: Turns, session_time_s: float) -> str | None:
-    """Which speaker IP owns the schedule at ``session_time_s`` (None in a gap)."""
+    """The first speaker whose window covers ``session_time_s`` (None in a gap).
+
+    Diagnostic only: windows can overlap (brief double-talk, backchannels), so more
+    than one speaker may be active at once — use ``is_my_turn`` to decide whether to
+    send audio, not this."""
     for w in turns.windows:
         if w.t0 <= session_time_s < w.t1:
             return w.speaker
@@ -64,8 +68,13 @@ def speaker_at(turns: Turns, session_time_s: float) -> str | None:
 
 
 def is_my_turn(turns: Turns, my_ip: str, session_time_s: float) -> bool:
-    """True when this client is the active speaker — i.e. should send real audio."""
-    return speaker_at(turns, session_time_s) == my_ip
+    """True when this client should be sending real audio at ``session_time_s``.
+
+    Checks *any* window covering this moment, not just the first, so an overlapping
+    speaker (an overlap handover or a backchannel) is correctly heard as speaking."""
+    return any(
+        w.t0 <= session_time_s < w.t1 and w.speaker == my_ip for w in turns.windows
+    )
 
 
 def zak_for(zoom_role: str, meeting: Meeting) -> str:

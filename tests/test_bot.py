@@ -50,6 +50,18 @@ def test_is_my_turn_only_for_the_active_speaker():
     assert is_my_turn(turns, "10.0.2.67", 7.0) is True
 
 
+def test_is_my_turn_true_for_both_during_overlap():
+    # When windows overlap (a brief handover or a backchannel), every speaker whose
+    # window covers the moment must be heard as speaking -- not just the first one.
+    turns = Turns(seed=1, windows=[
+        TurnWindow(0.0, 5.0, "10.0.1.119"),   # main turn
+        TurnWindow(2.0, 2.8, "10.0.2.67"),    # backchannel inside it
+    ])
+    assert is_my_turn(turns, "10.0.1.119", 2.4) is True
+    assert is_my_turn(turns, "10.0.2.67", 2.4) is True   # would fail with first-match logic
+    assert is_my_turn(turns, "10.0.2.67", 3.0) is False  # backchannel already ended
+
+
 # --- zak rule -------------------------------------------------------------- #
 
 def test_host_joins_with_zak_joiner_without():
