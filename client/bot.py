@@ -148,6 +148,7 @@ class Bot:
         self._pcm_file = None
         self._joined_reported = False
         self._mic_started = False
+        self._priv_requests = 0
         self._last_turn_log_bucket = -1
 
     # --- lifecycle --------------------------------------------------------- #
@@ -245,6 +246,14 @@ class Bot:
         self.participants_ctrl = self.meeting_service.GetMeetingParticipantsController()
         self.my_participant_id = self.participants_ctrl.GetMySelfUser().GetUserID()
 
+        # Host only: auto-grant local-recording privilege to joiners. Every bot needs
+        # StartRawRecording() to send mic audio, but a joiner can't self-grant — without
+        # this it stays stuck at "requesting" and is silent (host is audible, joiner is
+        # not). Turning on auto-allow means a joiner's RequestLocalRecordingPrivilege()
+        # is granted immediately, which fires its privilege-changed callback.
+        if self._config.zoom_role == ROLE_HOST:
+            self._allow_joiner_recording()
+
         # The SDK-6.3.5 raw-audio work-around: JoinVoip() must be called for audio to
         # flow at all (decision 8). Then unmute so this bot can actually be heard.
         self.audio_ctrl = self.meeting_service.GetMeetingAudioController()
@@ -274,14 +283,31 @@ class Bot:
         if self._mic_started:
             return
         if self.recording_ctrl.CanStartRawRecording() != zoom.SDKERR_SUCCESS:
-            print(f"[bot {self._config.my_ip}] no raw-recording privilege yet; requesting")
+            self._priv_requests += 1
+            print(f"[bot {self._config.my_ip}] no raw-recording privilege yet; "
+                  f"requesting (attempt {self._priv_requests})")
             self.recording_ctrl.RequestLocalRecordingPrivilege()
-            return  # wait for the privilege-changed callback to retry
+            # Retry a few times in case this joiner requested before the host had
+            # enabled auto-allow; the privilege-changed callback also retries on grant.
+            if self._priv_requests < 10:
+                self._schedule(3, self._start_raw_recording)
+            return
         if self.recording_ctrl.StartRawRecording() != zoom.SDKERR_SUCCESS:
             print(f"[bot {self._config.my_ip}] StartRawRecording failed")
             return
         print(f"[bot {self._config.my_ip}] raw recording started; bringing up mic")
         self._start_mic()
+
+    def _allow_joiner_recording(self) -> None:
+        """Host-side: let joiners obtain local-recording privilege automatically, so
+        they can StartRawRecording() and send mic audio. Best-effort — a failure here
+        must not break the host's own join, so it is logged, not raised."""
+        try:
+            self.participants_ctrl.AllowParticipantsToRequestLocalRecording(True)
+            self.participants_ctrl.AutoAllowLocalRecordingRequest(True)
+            print(f"[bot {self._config.my_ip}] host: auto-allow local recording enabled")
+        except Exception as err:  # noqa: BLE001 - log, don't crash the join
+            print(f"[bot {self._config.my_ip}] host: enabling auto-allow failed: {err}")
 
     def _on_record_privilege_changed(self, can_record) -> None:
         print(f"[bot {self._config.my_ip}] record privilege changed: can_record={can_record}")
