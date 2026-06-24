@@ -7,7 +7,7 @@
       "target": "108.132.222.246",
       "ports": [5201, 5202, 5203],
       "protocols": ["tcp", "udp"],
-      "rate_mbps": [0.5, 8],
+      "rate_mbps": [0.3, 2],
       "burst_s": [2, 10],
       "reverse_prob": 0.5
     },
@@ -26,8 +26,8 @@
         "https://speed.cloudflare.com/__down?bytes=30000000",
         "https://speed.cloudflare.com/__down?bytes=50000000"
       ],
-      "rate_mbps": [0.5, 10],
-      "max_time_s": [5, 30]
+      "rate_mbps": [0.3, 2],
+      "max_time_s": [5, 20]
     },
     "video": {
       "weight": 0.30,
@@ -35,7 +35,7 @@
         "https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_adv_example_hevc/master.m3u8",
         "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
       ],
-      "duration_s": [15, 90]
+      "duration_s": [10, 30]
     }
   }
 }
