@@ -112,15 +112,17 @@ def build_curl_command(burst: DownloadBurst) -> list[str]:
     caps the speed — expressed in bytes/second (an integer) to avoid curl's fractional
     suffix parsing.
 
-    ``-f`` turns an HTTP error (a 403/404, or a host rate-limiting us with 429) into a
-    **non-zero exit** instead of curl silently "succeeding" while moving zero bytes — the
-    runner then logs it loudly rather than printing a fake ``done … 0.1s``. ``--retry``
-    rides a *brief* throttle: a transient 429/5xx/timeout is retried (a dead 404 is not, so
-    a bad URL still fails fast). This is why the URL pool spans several hosts — load spreads
-    so no single host trips its limit, and if one does, the others still carry the noise."""
+    ``-f`` makes an HTTP error (403/404, or a host rate-limiting us with 429) move zero
+    bytes cleanly instead of writing an error page; ``--retry`` rides a *brief* throttle (a
+    transient 429/5xx/timeout is retried; a dead 404 is not, so a bad URL still fails fast).
+    ``-w %{size_download}`` makes curl print the bytes it actually moved, so the runner can
+    tell a real failure (≈0 bytes) from a *successful* long burst that curl aborts at
+    ``--max-time`` having already pulled megabytes (a non-zero exit, but real traffic — the
+    desired big burst). This is why the URL pool spans several hosts: load spreads so no
+    single host trips its limit, and if one does, the others still carry the noise."""
     limit_bytes_per_s = int(burst.rate_mbps * _BYTES_PER_SEC_PER_MBPS)
     return [
-        "curl", "-s", "-f", "-o", "/dev/null",
+        "curl", "-s", "-f", "-o", "/dev/null", "-w", "%{size_download}",
         "--retry", "2", "--retry-delay", "2",
         "--max-time", str(burst.max_time_s),
         "--limit-rate", str(limit_bytes_per_s),
@@ -308,36 +310,65 @@ class NoiseGenerator:
 # fires when no input arrives — is killed and the loop moves on.
 _BURST_TIMEOUT_S = 120
 
+# A download burst that moved fewer than this many bytes did ~nothing real: an HTTP error
+# (403/404), a host throttling us (429), or a failed connect. The smallest *legitimate*
+# burst still pulls hundreds of KB (rate floor 0.5 Mbps over the min window), so this
+# cleanly separates a dead burst from a successful one — including the case where curl
+# exits non-zero because it hit --max-time mid-transfer having already moved megabytes.
+_MIN_DOWNLOAD_BYTES = 64 * 1024
+
+
+def _curl_bytes_moved(stdout: bytes | None) -> int:
+    """Bytes curl reported via ``-w %{size_download}`` (0 if missing/unparseable)."""
+    if not stdout:
+        return 0
+    try:
+        return int(float(stdout.split()[-1]))
+    except (ValueError, IndexError):
+        return 0
+
 
 def _run_command_subprocess(argv: list[str]) -> None:
     """Run one real traffic burst, blocking until it finishes.
 
     A bad burst must not kill the loop — it just becomes a quieter stretch in the capture,
-    which is fine. Three ways a burst goes bad are all absorbed here: a non-zero exit
-    (server momentarily down, a URL 404s, or curl ``-f`` rejecting an HTTP error/throttle);
-    a hang (no data ever arrives — bounded by ``timeout`` then killed); and a missing
-    program (iperf3/curl/ffmpeg not installed — ``OSError``). Without this the loop would
+    which is fine. The ways a burst goes bad are all absorbed here: a hang (no data ever
+    arrives — bounded by ``timeout`` then killed), a missing program (iperf3/curl/ffmpeg not
+    installed — ``OSError``), and a burst that moved ~no traffic. Without this the loop would
     freeze or crash on the first such burst and noise would silently stop.
 
-    A non-zero exit is logged loudly rather than swallowed: a burst that fails moves ~no
-    bytes, and a *silent* failure is exactly how the dead-download bug hid before. A steady
-    stream of ``FAILED`` lines for one profile means that traffic kind isn't generating —
-    e.g. every download host throttling us at once."""
+    Failures are logged loudly, never swallowed — a *silent* dead burst is exactly how the
+    dead-download bug hid before. **Downloads are judged by bytes moved, not exit code:**
+    curl returns non-zero when it stops a transfer at ``--max-time`` even though it pulled
+    megabytes (the desired long burst), so only a near-zero byte count is a real failure
+    (HTTP error / throttle / dead host). Other tools are judged by exit code as before."""
     import subprocess
 
+    is_curl = bool(argv) and argv[0] == "curl"
     try:
         # Discard the child's own output (iperf's per-second wall of text, ffmpeg banners)
-        # so the only thing on the console is this loop's one-line-per-burst heartbeat.
-        result = subprocess.run(argv, check=False, timeout=_BURST_TIMEOUT_S,
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # so the console shows only this loop's heartbeat. curl's stdout is the one
+        # exception: it carries the -w byte count we need, so capture it.
+        result = subprocess.run(
+            argv, check=False, timeout=_BURST_TIMEOUT_S,
+            stdout=subprocess.PIPE if is_curl else subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     except subprocess.TimeoutExpired:
         print(f"[noise] burst exceeded {_BURST_TIMEOUT_S}s and was killed: {argv[0]}", flush=True)
+        return
     except OSError as err:
         print(f"[noise] burst could not run ({argv[0]}): {err}", flush=True)
-    else:
-        if result.returncode != 0:
-            print(f"[noise] burst FAILED rc={result.returncode} (moved ~no traffic): "
-                  f"{' '.join(argv)}", flush=True)
+        return
+
+    if is_curl:
+        moved = _curl_bytes_moved(result.stdout)
+        if moved < _MIN_DOWNLOAD_BYTES:
+            print(f"[noise] download FAILED (moved {moved} B, rc={result.returncode}): "
+                  f"{argv[-1]}", flush=True)
+    elif result.returncode != 0:
+        print(f"[noise] burst FAILED rc={result.returncode} (moved ~no traffic): "
+              f"{' '.join(argv)}", flush=True)
 
 
 def main() -> None:

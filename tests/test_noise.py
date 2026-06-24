@@ -287,7 +287,7 @@ def test_curl_command_caps_rate_in_bytes_per_second():
         DownloadBurst(url="https://host.example/a.bin", rate_mbps=2.0, max_time_s=20),
     )
     assert cmd == [
-        "curl", "-s", "-f", "-o", "/dev/null",
+        "curl", "-s", "-f", "-o", "/dev/null", "-w", "%{size_download}",
         "--retry", "2", "--retry-delay", "2",
         "--max-time", "20",
         "--limit-rate", "250000",   # 2 Mbps = 250,000 bytes/s
@@ -376,23 +376,59 @@ def test_burst_runner_survives_a_missing_program():
         subprocess.run = orig
 
 
-def test_burst_runner_logs_failed_on_nonzero_exit(capsys):
-    # A non-zero exit (curl -f rejecting a 403/404/throttle) moved ~no traffic, so it must
-    # be visible — not a fake "done". This is the silent-dead-download guard.
+def test_download_failure_logged_when_no_bytes_moved(capsys):
+    # A throttle/HTTP-error moves ~0 bytes — it must be visible, not a fake "done". This is
+    # the silent-dead-download guard.
     import subprocess
     import client.noise as n
 
     def fake_run(argv, check, timeout, **kwargs):
-        return subprocess.CompletedProcess(argv, 22)  # curl's HTTP-error exit code
+        return subprocess.CompletedProcess(argv, 22, stdout=b"0")  # curl -f rejected it
 
     orig = subprocess.run
     subprocess.run = fake_run
     try:
-        n._run_command_subprocess(["curl", "-f", "https://throttled.example/x"])
+        n._run_command_subprocess(["curl", "-w", "%{size_download}", "https://throttled.example/x"])
     finally:
         subprocess.run = orig
     out = capsys.readouterr().out
-    assert "FAILED" in out and "rc=22" in out
+    assert "FAILED" in out and "moved 0 B" in out
+
+
+def test_download_not_failed_when_maxtime_abort_moved_megabytes(capsys):
+    # curl exits non-zero when it stops a transfer at --max-time, but it pulled megabytes:
+    # that is the desired long burst, NOT a failure. Judge by bytes, not exit code.
+    import subprocess
+    import client.noise as n
+
+    def fake_run(argv, check, timeout, **kwargs):
+        return subprocess.CompletedProcess(argv, 28, stdout=b"5242880")  # 5 MB, then max-time
+
+    orig = subprocess.run
+    subprocess.run = fake_run
+    try:
+        n._run_command_subprocess(["curl", "-w", "%{size_download}", "https://host.example/big.bin"])
+    finally:
+        subprocess.run = orig
+    assert capsys.readouterr().out == ""
+
+
+def test_non_curl_failure_logged_on_nonzero_exit(capsys):
+    # iperf/ffmpeg are still judged by exit code (a broken server / missing stream).
+    import subprocess
+    import client.noise as n
+
+    def fake_run(argv, check, timeout, **kwargs):
+        return subprocess.CompletedProcess(argv, 1)
+
+    orig = subprocess.run
+    subprocess.run = fake_run
+    try:
+        n._run_command_subprocess(["iperf3", "-c", "dead-server"])
+    finally:
+        subprocess.run = orig
+    out = capsys.readouterr().out
+    assert "FAILED" in out and "rc=1" in out
 
 
 def test_burst_runner_quiet_on_success(capsys):
