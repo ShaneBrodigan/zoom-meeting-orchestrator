@@ -272,15 +272,30 @@ class NoiseGenerator:
         return round(self._rng.uniform(self._config.gap_s[0], self._config.gap_s[1]), 1)
 
 
+# A single burst must never wedge the forever-loop. Every burst is wall-clock bounded
+# above the longest legitimate one (video tops out at 90s) so a command that hangs — most
+# often ffmpeg blocking on a stalled HLS input, where -t bounds *output* time and so never
+# fires when no input arrives — is killed and the loop moves on.
+_BURST_TIMEOUT_S = 120
+
+
 def _run_command_subprocess(argv: list[str]) -> None:
     """Run one real traffic burst, blocking until it finishes.
 
-    A failed burst (server momentarily down, a URL 404s, a stream hiccups) must not kill
-    the loop — it just becomes a quieter stretch in the capture, which is fine — so a
-    non-zero exit is not raised."""
+    A bad burst must not kill the loop — it just becomes a quieter stretch in the capture,
+    which is fine. Three ways a burst goes bad are all absorbed here: a non-zero exit
+    (server momentarily down, a URL 404s — ``check=False``); a hang (no data ever arrives —
+    bounded by ``timeout`` then killed); and a missing program (iperf3/curl/ffmpeg not
+    installed — ``OSError``). Without this the loop would freeze or crash on the first such
+    burst and noise would silently stop."""
     import subprocess
 
-    subprocess.run(argv, check=False)
+    try:
+        subprocess.run(argv, check=False, timeout=_BURST_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        print(f"[noise] burst exceeded {_BURST_TIMEOUT_S}s and was killed: {argv[0]}")
+    except OSError as err:
+        print(f"[noise] burst could not run ({argv[0]}): {err}")
 
 
 def main() -> None:

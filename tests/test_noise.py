@@ -322,3 +322,54 @@ def test_run_cycle_fires_one_command_then_sleeps_one_gap():
 
     assert ran == [expected_cmd]
     assert slept == [expected_gap]
+
+
+# --- the real subprocess edge must never wedge or crash the loop ------------ #
+
+def test_burst_runner_bounds_each_burst_with_a_timeout():
+    import subprocess
+    import client.noise as n
+
+    seen = {}
+
+    def fake_run(argv, check, timeout):
+        seen["timeout"] = timeout
+        return None
+
+    orig = subprocess.run
+    subprocess.run = fake_run
+    try:
+        n._run_command_subprocess(["iperf3", "-c", "x"])
+    finally:
+        subprocess.run = orig
+    assert seen["timeout"] == n._BURST_TIMEOUT_S
+
+
+def test_burst_runner_survives_a_hang():
+    import subprocess
+    import client.noise as n
+
+    def fake_run(argv, check, timeout):
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
+
+    orig = subprocess.run
+    subprocess.run = fake_run
+    try:
+        n._run_command_subprocess(["ffmpeg", "-i", "dead-stream"])  # must not raise
+    finally:
+        subprocess.run = orig
+
+
+def test_burst_runner_survives_a_missing_program():
+    import subprocess
+    import client.noise as n
+
+    def fake_run(argv, check, timeout):
+        raise FileNotFoundError("ffmpeg not installed")
+
+    orig = subprocess.run
+    subprocess.run = fake_run
+    try:
+        n._run_command_subprocess(["ffmpeg", "-i", "x"])  # must not raise
+    finally:
+        subprocess.run = orig
