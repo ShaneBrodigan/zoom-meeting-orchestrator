@@ -32,6 +32,7 @@ tested with fakes: no real iperf/curl/ffmpeg, no real sleeping, no network.
 
 from __future__ import annotations
 
+import os
 import random
 import time
 from dataclasses import dataclass
@@ -109,10 +110,18 @@ def build_curl_command(burst: DownloadBurst) -> list[str]:
     ``-s`` quiet, ``-o /dev/null`` discards the file (only the network traffic matters,
     like the bot's stripped disk I/O). ``--max-time`` bounds the burst; ``--limit-rate``
     caps the speed — expressed in bytes/second (an integer) to avoid curl's fractional
-    suffix parsing."""
+    suffix parsing.
+
+    ``-f`` turns an HTTP error (a 403/404, or a host rate-limiting us with 429) into a
+    **non-zero exit** instead of curl silently "succeeding" while moving zero bytes — the
+    runner then logs it loudly rather than printing a fake ``done … 0.1s``. ``--retry``
+    rides a *brief* throttle: a transient 429/5xx/timeout is retried (a dead 404 is not, so
+    a bad URL still fails fast). This is why the URL pool spans several hosts — load spreads
+    so no single host trips its limit, and if one does, the others still carry the noise."""
     limit_bytes_per_s = int(burst.rate_mbps * _BYTES_PER_SEC_PER_MBPS)
     return [
-        "curl", "-s", "-o", "/dev/null",
+        "curl", "-s", "-f", "-o", "/dev/null",
+        "--retry", "2", "--retry-delay", "2",
         "--max-time", str(burst.max_time_s),
         "--limit-rate", str(limit_bytes_per_s),
         burst.url,
@@ -222,25 +231,33 @@ class NoiseGenerator:
     """The seeded burst/idle loop. ``run_forever`` is the front door."""
 
     def __init__(self, config: NoiseConfig, *, run_command: RunCommand,
-                 sleep: Sleep = time.sleep) -> None:
+                 sleep: Sleep = time.sleep, seed_offset: int = 0) -> None:
         self._config = config
         self._runners = [_make_runner(p) for p in config.profiles()]
         self._run_command = run_command
         self._sleep = sleep
-        self._rng = random.Random(config.seed)
+        # ``seed_offset`` lets a *second* noise generator run the same config but draw a
+        # different burst/URL sequence, so two generators don't hit the same host in
+        # lockstep (which would concentrate load and trip a rate limit). 0 = generator #1.
+        self._seed = config.seed + seed_offset
+        self._rng = random.Random(self._seed)
 
     @classmethod
     def from_env(cls) -> "NoiseGenerator":
         """Build for VM5: read ``config/noise.json`` via the instance-role S3, run real
-        commands (iperf3 / curl / ffmpeg)."""
+        commands (iperf3 / curl / ffmpeg).
+
+        ``NOISE_SEED_OFFSET`` (default 0) desynchronizes a second generator — run it with
+        ``NOISE_SEED_OFFSET=1 python3 -m client.noise`` on the extra noise node."""
         config = SessionStore().read_noise_config()
-        return cls(config, run_command=_run_command_subprocess)
+        seed_offset = int(os.environ.get("NOISE_SEED_OFFSET", "0"))
+        return cls(config, run_command=_run_command_subprocess, seed_offset=seed_offset)
 
     # --- front door -------------------------------------------------------- #
 
     def run_forever(self) -> None:
         """Fire bursts with random gaps between, forever (stopped by hand / container stop)."""
-        self._log(f"starting: {len(self._runners)} profiles, seed {self._config.seed}. "
+        self._log(f"starting: {len(self._runners)} profiles, seed {self._seed}. "
                   f"One line per burst follows — steady lines = alive, a stall = frozen.")
         while True:
             self.run_cycle()
@@ -297,21 +314,30 @@ def _run_command_subprocess(argv: list[str]) -> None:
 
     A bad burst must not kill the loop — it just becomes a quieter stretch in the capture,
     which is fine. Three ways a burst goes bad are all absorbed here: a non-zero exit
-    (server momentarily down, a URL 404s — ``check=False``); a hang (no data ever arrives —
-    bounded by ``timeout`` then killed); and a missing program (iperf3/curl/ffmpeg not
-    installed — ``OSError``). Without this the loop would freeze or crash on the first such
-    burst and noise would silently stop."""
+    (server momentarily down, a URL 404s, or curl ``-f`` rejecting an HTTP error/throttle);
+    a hang (no data ever arrives — bounded by ``timeout`` then killed); and a missing
+    program (iperf3/curl/ffmpeg not installed — ``OSError``). Without this the loop would
+    freeze or crash on the first such burst and noise would silently stop.
+
+    A non-zero exit is logged loudly rather than swallowed: a burst that fails moves ~no
+    bytes, and a *silent* failure is exactly how the dead-download bug hid before. A steady
+    stream of ``FAILED`` lines for one profile means that traffic kind isn't generating —
+    e.g. every download host throttling us at once."""
     import subprocess
 
     try:
         # Discard the child's own output (iperf's per-second wall of text, ffmpeg banners)
         # so the only thing on the console is this loop's one-line-per-burst heartbeat.
-        subprocess.run(argv, check=False, timeout=_BURST_TIMEOUT_S,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        result = subprocess.run(argv, check=False, timeout=_BURST_TIMEOUT_S,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
-        print(f"[noise] burst exceeded {_BURST_TIMEOUT_S}s and was killed: {argv[0]}")
+        print(f"[noise] burst exceeded {_BURST_TIMEOUT_S}s and was killed: {argv[0]}", flush=True)
     except OSError as err:
-        print(f"[noise] burst could not run ({argv[0]}): {err}")
+        print(f"[noise] burst could not run ({argv[0]}): {err}", flush=True)
+    else:
+        if result.returncode != 0:
+            print(f"[noise] burst FAILED rc={result.returncode} (moved ~no traffic): "
+                  f"{' '.join(argv)}", flush=True)
 
 
 def main() -> None:

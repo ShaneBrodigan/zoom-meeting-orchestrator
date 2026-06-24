@@ -287,7 +287,8 @@ def test_curl_command_caps_rate_in_bytes_per_second():
         DownloadBurst(url="https://host.example/a.bin", rate_mbps=2.0, max_time_s=20),
     )
     assert cmd == [
-        "curl", "-s", "-o", "/dev/null",
+        "curl", "-s", "-f", "-o", "/dev/null",
+        "--retry", "2", "--retry-delay", "2",
         "--max-time", "20",
         "--limit-rate", "250000",   # 2 Mbps = 250,000 bytes/s
         "https://host.example/a.bin",
@@ -334,7 +335,7 @@ def test_burst_runner_bounds_each_burst_with_a_timeout():
 
     def fake_run(argv, check, timeout, **kwargs):
         seen["timeout"] = timeout
-        return None
+        return subprocess.CompletedProcess(argv, 0)
 
     orig = subprocess.run
     subprocess.run = fake_run
@@ -373,3 +374,65 @@ def test_burst_runner_survives_a_missing_program():
         n._run_command_subprocess(["ffmpeg", "-i", "x"])  # must not raise
     finally:
         subprocess.run = orig
+
+
+def test_burst_runner_logs_failed_on_nonzero_exit(capsys):
+    # A non-zero exit (curl -f rejecting a 403/404/throttle) moved ~no traffic, so it must
+    # be visible — not a fake "done". This is the silent-dead-download guard.
+    import subprocess
+    import client.noise as n
+
+    def fake_run(argv, check, timeout, **kwargs):
+        return subprocess.CompletedProcess(argv, 22)  # curl's HTTP-error exit code
+
+    orig = subprocess.run
+    subprocess.run = fake_run
+    try:
+        n._run_command_subprocess(["curl", "-f", "https://throttled.example/x"])
+    finally:
+        subprocess.run = orig
+    out = capsys.readouterr().out
+    assert "FAILED" in out and "rc=22" in out
+
+
+def test_burst_runner_quiet_on_success(capsys):
+    # A clean burst prints nothing here (the loop's own done-line is the heartbeat).
+    import subprocess
+    import client.noise as n
+
+    def fake_run(argv, check, timeout, **kwargs):
+        return subprocess.CompletedProcess(argv, 0)
+
+    orig = subprocess.run
+    subprocess.run = fake_run
+    try:
+        n._run_command_subprocess(["iperf3", "-c", "x"])
+    finally:
+        subprocess.run = orig
+    assert capsys.readouterr().out == ""
+
+
+# --- a second generator desynchronizes from the first ---------------------- #
+
+def test_seed_offset_changes_the_sequence():
+    cfg = make_config()
+    base = NoiseGenerator(cfg, run_command=lambda a: None, sleep=lambda s: None)
+    offset = NoiseGenerator(cfg, run_command=lambda a: None, sleep=lambda s: None,
+                            seed_offset=1)
+
+    base_seq = [base.pick_runner().draw_command(base._rng) for _ in range(20)]
+    offset_seq = [offset.pick_runner().draw_command(offset._rng) for _ in range(20)]
+
+    assert base_seq != offset_seq  # two generators won't hit hosts in lockstep
+
+
+def test_seed_offset_zero_matches_base_seed():
+    cfg = make_config()
+    base = NoiseGenerator(cfg, run_command=lambda a: None, sleep=lambda s: None)
+    zero = NoiseGenerator(cfg, run_command=lambda a: None, sleep=lambda s: None,
+                          seed_offset=0)
+
+    base_seq = [base.pick_runner().draw_command(base._rng) for _ in range(20)]
+    zero_seq = [zero.pick_runner().draw_command(zero._rng) for _ in range(20)]
+
+    assert base_seq == zero_seq  # offset 0 = generator #1, unchanged
