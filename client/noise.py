@@ -240,6 +240,8 @@ class NoiseGenerator:
 
     def run_forever(self) -> None:
         """Fire bursts with random gaps between, forever (stopped by hand / container stop)."""
+        self._log(f"starting: {len(self._runners)} profiles, seed {self._config.seed}. "
+                  f"One line per burst follows — steady lines = alive, a stall = frozen.")
         while True:
             self.run_cycle()
 
@@ -248,10 +250,21 @@ class NoiseGenerator:
         idle a drawn gap.
 
         The RNG is consumed pick-then-burst-then-gap, the same order every cycle, so the
-        whole mixed sequence is reproducible from the seed."""
+        whole mixed sequence is reproducible from the seed. A ``start``/``done`` line
+        brackets the burst so a freeze is visible: a ``start`` with no matching ``done``
+        is the loop stuck inside that command."""
         runner = self.pick_runner()
-        self._run_command(runner.draw_command(self._rng))
-        self._sleep(self.draw_gap())
+        argv = runner.draw_command(self._rng)
+        self._log(f"start {runner.name}: {' '.join(argv)}")
+        started = time.monotonic()
+        self._run_command(argv)
+        gap = self.draw_gap()
+        self._log(f"done  {runner.name} in {time.monotonic() - started:.1f}s; idle {gap}s")
+        self._sleep(gap)
+
+    def _log(self, msg: str) -> None:
+        """One timestamped line, flushed immediately so it shows even when piped to a file."""
+        print(f"[noise] {time.strftime('%H:%M:%S')} {msg}", flush=True)
 
     # --- the seeded draws (public so they can be checked directly) --------- #
 
@@ -291,7 +304,10 @@ def _run_command_subprocess(argv: list[str]) -> None:
     import subprocess
 
     try:
-        subprocess.run(argv, check=False, timeout=_BURST_TIMEOUT_S)
+        # Discard the child's own output (iperf's per-second wall of text, ffmpeg banners)
+        # so the only thing on the console is this loop's one-line-per-burst heartbeat.
+        subprocess.run(argv, check=False, timeout=_BURST_TIMEOUT_S,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         print(f"[noise] burst exceeded {_BURST_TIMEOUT_S}s and was killed: {argv[0]}")
     except OSError as err:

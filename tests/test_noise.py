@@ -332,7 +332,7 @@ def test_burst_runner_bounds_each_burst_with_a_timeout():
 
     seen = {}
 
-    def fake_run(argv, check, timeout):
+    def fake_run(argv, check, timeout, **kwargs):
         seen["timeout"] = timeout
         return None
 
@@ -349,7 +349,7 @@ def test_burst_runner_survives_a_hang():
     import subprocess
     import client.noise as n
 
-    def fake_run(argv, check, timeout):
+    def fake_run(argv, check, timeout, **kwargs):
         raise subprocess.TimeoutExpired(cmd=argv, timeout=timeout)
 
     orig = subprocess.run
@@ -364,7 +364,7 @@ def test_burst_runner_survives_a_missing_program():
     import subprocess
     import client.noise as n
 
-    def fake_run(argv, check, timeout):
+    def fake_run(argv, check, timeout, **kwargs):
         raise FileNotFoundError("ffmpeg not installed")
 
     orig = subprocess.run
