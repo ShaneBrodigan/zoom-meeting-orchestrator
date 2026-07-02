@@ -29,13 +29,20 @@ from __future__ import annotations
 
 import base64
 import os
-from typing import Any
+import time
+from typing import Any, Callable
 
 from common.schema import Meeting
 
 # Zoom REST endpoints (account-level server-to-server OAuth).
 _OAUTH_TOKEN_URL = "https://zoom.us/oauth/token"
 _API_BASE = "https://api.zoom.us/v2"
+
+# S2S access tokens live ~1 hour (Zoom returns the exact lifetime as ``expires_in``).
+# We refresh a bit early so a token can never expire mid-request during a long batch —
+# the bug that killed the first overnight bulk run at the 60-minute mark.
+_TOKEN_REFRESH_MARGIN_S = 60.0
+_DEFAULT_TOKEN_LIFETIME_S = 3600.0
 
 # S2S credential environment variables (supplied via .env on VM4; gitignored).
 ENV_ACCOUNT_ID = "ZOOM_S2S_ACCOUNT_ID"
@@ -51,15 +58,18 @@ class MeetingScheduler:
     """VM4's front door to Zoom: create an instant meeting, then end it."""
 
     def __init__(self, account_id: str, client_id: str, client_secret: str,
-                 *, http: Any = None) -> None:
+                 *, http: Any = None, clock: Callable[[], float] = time.monotonic) -> None:
         self._account_id = account_id
         self._client_id = client_id
         self._client_secret = client_secret
         self._http = http if http is not None else _make_http_session()
+        self._clock = clock
         self._access_token: str | None = None
+        self._token_expiry: float = 0.0  # clock() time at which the cached token goes stale
 
     @classmethod
-    def from_env(cls, *, http: Any = None) -> "MeetingScheduler":
+    def from_env(cls, *, http: Any = None,
+                 clock: Callable[[], float] = time.monotonic) -> "MeetingScheduler":
         """Build from the S2S credentials in the environment (the .env on VM4)."""
         try:
             account_id = os.environ[ENV_ACCOUNT_ID]
@@ -69,7 +79,7 @@ class MeetingScheduler:
             raise MeetingSchedulerError(
                 f"missing Zoom S2S credential in environment: {missing.args[0]}"
             ) from None
-        return cls(account_id, client_id, client_secret, http=http)
+        return cls(account_id, client_id, client_secret, http=http, clock=clock)
 
     # --- front door -------------------------------------------------------- #
 
@@ -103,8 +113,13 @@ class MeetingScheduler:
     # --- internals --------------------------------------------------------- #
 
     def _token(self) -> str:
-        """Fetch and cache the S2S access token (one round trip per scheduler)."""
-        if self._access_token is not None:
+        """Return a valid S2S access token, fetching a fresh one when the cached one is stale.
+
+        The token is cached and reused across calls (one round trip covers many meetings),
+        but only until it nears expiry: a batch that runs longer than the ~1-hour token
+        lifetime would otherwise fail its next REST call with ``HTTP 401: expired``."""
+        now = self._clock()
+        if self._access_token is not None and now < self._token_expiry:
             return self._access_token
         creds = base64.b64encode(
             f"{self._client_id}:{self._client_secret}".encode()
@@ -118,7 +133,9 @@ class MeetingScheduler:
         token = body.get("access_token")
         if not token:
             raise MeetingSchedulerError("Zoom authenticate returned no access_token")
+        lifetime = body.get("expires_in", _DEFAULT_TOKEN_LIFETIME_S)
         self._access_token = token
+        self._token_expiry = now + lifetime - _TOKEN_REFRESH_MARGIN_S
         return token
 
     def _get_zak(self, token: str) -> str:

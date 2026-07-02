@@ -130,6 +130,37 @@ def test_token_fetched_only_once_across_calls():
     assert len(token_posts) == 1
 
 
+def test_token_reused_within_its_lifetime():
+    # A short hop later, the cached token is still valid -> no second auth round trip.
+    now = [1000.0]
+    fake = FakeZoom(token=FakeResponse(200, {"access_token": "tok-1", "expires_in": 3600}))
+    sched = MeetingScheduler("acct-1", "client-1", "secret", http=fake, clock=lambda: now[0])
+    sched.end_meeting("m1")
+    now[0] += 60.0  # well inside the ~1h life
+    sched.end_meeting("m2")
+    token_posts = [c for c in fake.calls if c[0] == "POST" and "oauth/token" in c[1]]
+    assert len(token_posts) == 1
+
+
+def test_token_refreshed_after_it_expires():
+    # The overnight-batch bug: past the ~1h token life, the next call must re-auth with a
+    # fresh token instead of reusing the stale one (which Zoom rejects with HTTP 401).
+    now = [1000.0]
+    fake = FakeZoom(token=FakeResponse(200, {"access_token": "tok-1", "expires_in": 3600}))
+    sched = MeetingScheduler("acct-1", "client-1", "secret", http=fake, clock=lambda: now[0])
+
+    sched.end_meeting("m1")                       # first auth -> tok-1
+    now[0] += 3600.0                              # jump past expiry (1000 + 3600 - 60 margin)
+    fake.token = FakeResponse(200, {"access_token": "tok-2", "expires_in": 3600})
+    sched.end_meeting("m2")                       # stale -> re-auth -> tok-2
+
+    token_posts = [c for c in fake.calls if c[0] == "POST" and "oauth/token" in c[1]]
+    assert len(token_posts) == 2
+    puts = calls_of(fake, "PUT")
+    assert puts[0][2]["Authorization"] == "Bearer tok-1"
+    assert puts[1][2]["Authorization"] == "Bearer tok-2"  # second call used the fresh token
+
+
 # --- end_meeting ----------------------------------------------------------- #
 
 def test_end_meeting_targets_the_meeting_id():

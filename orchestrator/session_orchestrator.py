@@ -182,6 +182,9 @@ class SessionOrchestrator:
             raise cleanup_error
 
         pcap_key = self._store.upload_capture(config.session_id, pcap_path)
+        # The pcap is safely in S3 now; drop the local copy so a long batch can't fill
+        # VM4's small disk (each session's pcap is ~1-2 GB of noise-heavy traffic).
+        self._discard_local_pcap(pcap_path)
         heartbeats = self._store.read_all_heartbeats(config.session_id)
         manifest = build_manifest(
             spec,
@@ -219,3 +222,15 @@ class SessionOrchestrator:
             except Exception as err:  # noqa: BLE001
                 error = error or err
         return t_stop, error
+
+    @staticmethod
+    def _discard_local_pcap(pcap_path: str) -> None:
+        """Delete the local pcap once it's safely in S3.
+
+        Best-effort: the data is already uploaded, so a leftover file is only a disk
+        nuisance — never a reason to fail a session. A whole overnight batch's pcaps
+        (~1-2 GB each) would otherwise fill VM4's small root disk."""
+        try:
+            os.remove(pcap_path)
+        except OSError:
+            pass

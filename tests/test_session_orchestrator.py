@@ -286,6 +286,30 @@ def test_cleanup_error_surfaces_on_happy_path():
         orch.run_session(two_party_config())
 
 
+# --- local pcap cleanup (keeps VM4's disk from filling over a batch) -------- #
+
+def test_local_pcap_deleted_after_upload(tmp_path):
+    # Once the pcap is safely in S3, its local copy is removed so an overnight batch of
+    # ~1-2 GB pcaps can't fill VM4's small root disk.
+    orch, _, _, _, _, _ = make_orchestrator()
+    cfg = two_party_config(session_id="sess-cleanup")
+    cfg.pcap_dir = str(tmp_path)
+    pcap = tmp_path / "sess-cleanup.pcap"
+    pcap.write_bytes(b"fake pcap bytes")
+    orch.run_session(cfg)
+    assert not pcap.exists()
+
+
+def test_missing_local_pcap_is_not_an_error(tmp_path):
+    # Cleanup is best-effort: if the file is already gone, the session still completes
+    # (the data is in S3 either way).
+    orch, _, _, _, _, _ = make_orchestrator()
+    cfg = two_party_config(session_id="sess-nopcap")
+    cfg.pcap_dir = str(tmp_path)  # no pcap file created
+    manifest = orch.run_session(cfg)
+    assert manifest.session_id == "sess-nopcap"
+
+
 # --- config / id helpers --------------------------------------------------- #
 
 def test_roster_with_only_noise_is_rejected():

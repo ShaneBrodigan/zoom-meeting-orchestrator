@@ -1,7 +1,7 @@
 {
   "duration": {
-    "buckets_min": [5, 15, 20, 30],
-    "weights": [0.25, 0.25, 0.25, 0.25],
+    "buckets_min": [5, 10, 15, 20, 30],
+    "weights": [0.20, 0.20, 0.20, 0.20, 0.20],
     "jitter_pct": 0.10,
     "min_duration_s": 30
   },
