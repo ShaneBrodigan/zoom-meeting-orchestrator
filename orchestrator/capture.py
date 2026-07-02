@@ -36,6 +36,13 @@ CLIENT_SUBNETS = ("10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24", "10.0.4.0/24")
 # Excluded so VM4's SSH control traffic never enters a labeled capture.
 _EXCLUDE_EXPR = "not tcp port 22"
 
+# Per-packet capture length (tshark ``-s``): keep only the first N bytes of each packet.
+# Noise packets are full-MTU (~1400 B), so truncating them here is what keeps a 30-minute
+# noise-heavy pcap from reaching gigabytes. 256 B comfortably preserves every L2-L4 header
+# (so the flow 5-tuples the labeler needs are intact) plus the first payload bytes ET-BERT
+# tokenizes; it only drops the deep-payload tail neither the labeler nor ET-BERT reads.
+DEFAULT_SNAPLEN = 256
+
 # tshark prints this to stderr once the capture is live and the pcap is open.
 _READY_MARKER = "Capturing on"
 
@@ -58,6 +65,7 @@ class PacketCapture:
 
     def __init__(self, pcap_path: str, *, interface: str = DEFAULT_INTERFACE,
                  subnets: tuple[str, ...] = CLIENT_SUBNETS,
+                 snaplen: int = DEFAULT_SNAPLEN,
                  popen: Popen | None = None,
                  clock: Callable[[], float] = time.time,
                  ready_timeout_s: float = 15.0,
@@ -65,6 +73,7 @@ class PacketCapture:
         self.pcap_path = pcap_path
         self.interface = interface
         self.subnets = subnets
+        self.snaplen = snaplen
         self._popen = popen if popen is not None else _default_popen
         self._clock = clock
         self._ready_timeout_s = ready_timeout_s
@@ -87,6 +96,7 @@ class PacketCapture:
             "-i", self.interface,
             "-n",                       # no name resolution: tshark adds no lookup traffic of its own
             "-f", self.capture_filter,
+            "-s", str(self.snaplen),    # truncate each packet: keeps headers + first payload bytes
             "-w", self.pcap_path,
         ]
 

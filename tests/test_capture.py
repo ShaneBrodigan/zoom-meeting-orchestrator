@@ -100,6 +100,20 @@ def test_build_argv_has_interface_filter_and_output():
     assert argv[argv.index("-w") + 1] == "/tmp/capture.pcap"
 
 
+def test_build_argv_snaplen_defaults_to_256():
+    # Snaplen keeps 30-min noise-heavy pcaps from ballooning; 256 B keeps every header
+    # (labeler 5-tuples) plus the first payload bytes ET-BERT reads.
+    cap = PacketCapture("/tmp/capture.pcap")
+    argv = cap.build_argv()
+    assert argv[argv.index("-s") + 1] == "256"
+
+
+def test_build_argv_snaplen_is_overridable():
+    cap = PacketCapture("/tmp/capture.pcap", snaplen=128)
+    argv = cap.build_argv()
+    assert argv[argv.index("-s") + 1] == "128"
+
+
 # --- start: waits for readiness, records t_start --------------------------- #
 
 def test_start_waits_for_ready_then_records_tstart():
